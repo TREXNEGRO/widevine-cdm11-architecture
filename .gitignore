@@ -1,0 +1,22 @@
+# Compiled LaTeX intermediates
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+
+# Compiled binaries
+scripts/*.dll
+scripts/*.exe
+scripts/*.lib
+
+# Runtime captures (Buchanan rule: never commit)
+*.jsonl
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
