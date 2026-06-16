@@ -152,125 +152,144 @@ Mojo utility process
 to it over IPC, and asks the library to construct a CDM instance
 implementing a stable C++ interface defined in
 \texttt{content\_decryption\_module.h}~\cite{chromium-cdm-api}.
-From the host's point of view the interface is small (nineteen
-virtual methods) and well documented: \texttt{Initialize},
-\texttt{GetStatusForPolicy}, \texttt{CreateSessionAndGenerateRequest},
-\texttt{UpdateSession}, and twelve other methods that cover license
-exchange, decryption, decode, and lifecycle.
+Desde el punto de vista del anfitrión, la interfaz es chica
+(diecinueve métodos virtuales) y bien documentada:
+\texttt{Initialize}, \texttt{GetStatusForPolicy},
+\texttt{CreateSessionAndGenerateRequest},
+\texttt{UpdateSession}, y otros doce métodos que cubren el
+intercambio de licencias, el descifrado, la decodificación y el
+lifecycle.
 
-From the \emph{library}'s point of view this clean nineteen-method
-surface is the visible peak of a much larger iceberg. The Windows L1
-build of Widevine implements a multi-million-instruction obfuscated
-runtime under tens of megabytes of closed source code, integrates
-with Windows Protected Media Path (PMP) when hardware decode is
-available, and is bound by a strict licensing regime that prohibits
-study of its decryption internals. Public knowledge of the
-implementation is fragmentary: the Chromium tree contains the
-\emph{host-side} of the EME plumbing, several academic and
-hobbyist projects have studied the \emph{Android L3} variant
-\cite{quarkslab-widevine, l3-decryptor}, but the desktop Windows
-L1 variant has received comparatively little architectural attention
-in the open literature.
+Desde la perspectiva de la \emph{biblioteca}, esta interfaz limpia
+de diecinueve métodos es la punta visible de un iceberg mucho
+mayor. El build L1 de Windows de Widevine implementa un runtime
+ofuscado de varios millones de instrucciones bajo decenas de
+megabytes de código cerrado, se integra con Windows Protected
+Media Path (PMP) cuando hay decodificación por hardware
+disponible, y está sujeto a un régimen de licencia estricto que
+prohíbe el estudio de sus internals de descifrado. El conocimiento
+público sobre la implementación es fragmentario: el árbol de
+Chromium contiene el \emph{lado anfitrión} del cableado EME,
+varios proyectos académicos y de aficionados han estudiado la
+variante \emph{Android L3} \cite{quarkslab-widevine,
+l3-decryptor}, pero la variante L1 de escritorio en Windows ha
+recibido comparativamente poca atención arquitectural en la
+literatura abierta.
 
-The motivation for this study is methodological as much as it is
-technical. Several recent legal episodes have shown that
-\emph{publishing what one learns} about DRM internals is more legally
-exposed than \emph{learning it}, and that the reproducibility of a
-result matters as much as the result itself
-\cite{sklyarov-case, dvdjon-norway, hadad-case}. Following the
-Buchanan model of architectural reverse engineering \cite{buchanan-blog,
-buchanan-imessage} --- probe everything, document the technique,
-publish no extraction artefact --- we set out to build a fully
-reproducible, fully open methodology for studying the Widevine CDM
-and to apply it to the questions that are paper-able without
-crossing the digital-rights-management circumvention line.
+La motivación de este estudio es tanto metodológica como técnica.
+Varios episodios legales recientes han mostrado que
+\emph{publicar lo que uno aprende} sobre internals de DRM está más
+expuesto legalmente que \emph{aprenderlo}, y que la
+reproducibilidad de un resultado pesa tanto como el resultado en
+sí \cite{sklyarov-case, dvdjon-norway, hadad-case}. Siguiendo el
+modelo Buchanan de ingeniería inversa arquitectural
+\cite{buchanan-blog, buchanan-imessage} --- explorar todo,
+documentar la técnica, no publicar artefacto de extracción ---
+nos propusimos construir una metodología completamente
+reproducible y completamente abierta para estudiar el CDM
+Widevine y aplicarla a las preguntas que son publicables sin
+cruzar la línea de la circumvención de gestión de derechos
+digitales.
 
 \subsection*{Lo nuevo de este trabajo}
 
 \begin{enumerate}[itemsep=4pt,topsep=2pt]
-  \item \textbf{The first public architectural map of L1
-        \texttt{widevinecdm.dll} on Windows.}  Three concentric
-        vtables, every entry classified, every dispatch offset
-        byte-verified.  Cross-validated in Chrome 149 and Edge 150.
-        Drop-in reproducible against any future build via the
-        released parameter-free discoverer.
+  \item \textbf{El primer mapa arquitectural público de L1
+        \texttt{widevinecdm.dll} en Windows.} Tres vtables
+        concéntricas, cada entrada clasificada, cada offset de
+        despacho verificado byte-a-byte. Validación cruzada en
+        Chrome 149 y Edge 150. Reproducible drop-in sobre cualquier
+        build futuro vía el discoverer libre de parámetros que
+        liberamos.
 
-  \item \textbf{Hardware-decode dormancy, runtime-confirmed.}  Four
-        outer-vtable slots patched in a single experiment.  Across
-        90+ seconds of continuous 4K HDR Netflix playback,
-        \(g\_calls = 0\) on slot 14
-        (\texttt{DecryptAndDecodeFrame}), slot 15
-        (\texttt{DecryptAndDecodeSamples}), and slot 9
-        (\texttt{Decrypt}) simultaneously.  Per-frame work on L1
-        does not traverse the public CDM interface; the EME-facing
-        attack surface for per-frame interception is, for practical
-        purposes, empty.
+  \item \textbf{Inactividad bajo decode por hardware,
+        runtime-confirmada.} Cuatro ranuras de la outer-vtable
+        patcheadas en un solo experimento. A lo largo de más de 90
+        segundos de reproducción 4K HDR continua de Netflix,
+        \(g\_calls = 0\) en la ranura 14
+        (\texttt{DecryptAndDecodeFrame}), la 15
+        (\texttt{DecryptAndDecodeSamples}) y la 9
+        (\texttt{Decrypt}) simultáneamente. El trabajo por-cuadro
+        en L1 no atraviesa la interfaz pública del CDM; la
+        superficie de ataque vista desde EME para intercepción
+        por-cuadro es, en términos prácticos, vacía.
 
-  \item \textbf{A per-slot attack-surface table.}  Which slots
-        ingest attacker-controllable structured input (PSSH,
-        license response, policy), which slots pass opaque blobs,
-        which slots are dormant.  Cross-source consistent: Netflix
-        and Bitmovin Widevine demo exercise the same slots in the
-        same order.  Defenders use the table directly to scope
-        detection; attackers use it directly to prioritise the
-        layer-3 handlers that actually matter.
+  \item \textbf{Una tabla de superficie de ataque por ranura.}
+        Qué ranuras ingieren input estructurado
+        atacante-controlable (PSSH, respuesta de licencia,
+        política), qué ranuras pasan blobs opacos, qué ranuras
+        están dormidas. Consistente entre fuentes: Netflix y el
+        demo Widevine de Bitmovin ejercen las mismas ranuras en el
+        mismo orden. Los defensores usan la tabla directamente
+        para alcance de detección; los atacantes la usan
+        directamente para priorizar los handlers de capa-3 que de
+        verdad importan.
 
-  \item \textbf{MBA-style obfuscation, mapped depth-relative.}  Each
-        of the nineteen CDM\_11 slots characterised at every layer of
-        the dispatch.  Obfuscation lives at varying depths,
-        consistently appearing where structured attacker data
-        begins to be parsed and consistently absent on
-        passthrough slots.  Concrete examples with byte-level
-        signatures for each.
+  \item \textbf{Ofuscación estilo MBA, mapeada relativa a la
+        profundidad.} Cada una de las diecinueve ranuras CDM\_11
+        caracterizada en cada capa del despacho. La ofuscación
+        vive a profundidades variables, apareciendo consistentemente
+        donde los datos estructurados del atacante empiezan a ser
+        parseados y ausente consistentemente en ranuras de
+        passthrough. Ejemplos concretos con firmas byte-level para
+        cada una.
 
-  \item \textbf{A methodology that travels.}  The
-        \emph{shape-only observation} pattern is generalisable to
-        any closed-source binary with a stable interface.  The
-        same hook design applies, unchanged in shape, to PlayReady's
-        \texttt{PlayReadyHost}, FairPlay's
-        \texttt{AppleSpringboard}, or any other host-CDM contract
-        where the question is \emph{which entries fire when} and
-        the answer must not capture content.  We release the
-        Buchanan-style framework as a methodology contribution in
-        its own right.
+  \item \textbf{Una metodología que viaja.} El patrón de
+        \emph{observación shape-only} es generalizable a cualquier
+        binario closed-source con una interfaz estable. El mismo
+        diseño de hook aplica, sin cambiar de forma, al
+        \texttt{PlayReadyHost} de PlayReady, al
+        \texttt{AppleSpringboard} de FairPlay, o a cualquier otro
+        contrato host-CDM donde la pregunta es \emph{qué entradas
+        disparan cuándo} y la respuesta no debe capturar
+        contenido. Liberamos el framework estilo Buchanan como una
+        contribución metodológica en sí misma.
 
-  \item \textbf{Defender's playbook and attacker's reading.}  Two
-        explicit sections that translate the findings into concrete
-        action.  Detection signatures, hook canaries, behavioural
-        profiles, and per-slot prioritisation for both sides.
+  \item \textbf{Manual del defensor y lectura del atacante.} Dos
+        secciones explícitas que traducen los hallazgos en acción
+        concreta. Firmas de detección, canarios de hook, perfiles
+        de comportamiento, y priorización por ranura para ambos
+        lados.
 
-  \item \textbf{Reproducible and falsifiable.}  Every empirical claim
-        anchors to a recorded experimental run.  Every architectural
-        claim is rederivable from the public binary by the released
-        discoverer.  The falsification sprint that preceded
-        publication is documented in full.
+  \item \textbf{Reproducible y falsable.} Cada afirmación empírica
+        está anclada a una corrida experimental grabada. Cada
+        afirmación arquitectural es rederivable desde el binario
+        público mediante el discoverer que liberamos. El sprint de
+        falsificación que precedió a la publicación está
+        documentado en su totalidad.
 \end{enumerate}
 
 \subsection*{Hoja de ruta del paper}
 
-The paper proceeds as follows. Section~\ref{sec:antecedents} situates
-this work in two decades of prior reverse engineering of commercial
-DRM and the legal precedents that have shaped it.
-Section~\ref{sec:background} introduces the Widevine licensing
-levels, the EME dispatch path, the Mojo IPC architecture used by
-Chromium for CDM hosting, the Windows PMP boundary, the Common
-Encryption format (CENC) used by all Widevine content, and the PSSH
-box structure that carries attacker-controllable initialisation data.
-Section~\ref{sec:threat} states the threat model and ethical scope.
-Section~\ref{sec:static} walks through the static reverse engineering
-of CDM\_11 in detail, with concrete disassembly listings.
-Section~\ref{sec:runtime} describes the runtime instrumentation,
-including the design subtleties of CIG bypass, CFG bitmap
-registration, and the per-slot back-pointer chain.
-Section~\ref{sec:findings} presents the empirical findings.
-Section~\ref{sec:obfuscation} treats the obfuscation distribution as
-its own architectural defence. Section~\ref{sec:cross} establishes
-cross-binary and cross-source stability. Section~\ref{sec:robustness}
-reports on the falsification tests, including the candidate findings
-that were refuted by deeper analysis. Section~\ref{sec:discussion}
-discusses what the model implies for both attackers and defenders of
-desktop DRM. Section~\ref{sec:ethics} states what was not done and
-why. Section~\ref{sec:conclusion} concludes.
+El paper procede de la siguiente forma. La
+Sección~\ref{sec:antecedents} sitúa este trabajo dentro de dos
+décadas de ingeniería inversa previa de DRM comercial y los
+precedentes legales que la han moldeado.
+La Sección~\ref{sec:background} introduce los niveles de licencia
+de Widevine, el camino de despacho EME, la arquitectura Mojo IPC
+que usa Chromium para hospedar el CDM, el límite PMP de Windows,
+el formato Common Encryption (CENC) que usa todo el contenido
+Widevine, y la estructura de la caja PSSH que transporta datos
+de inicialización atacante-controlables.
+La Sección~\ref{sec:threat} declara el modelo de amenaza y el
+alcance ético.
+La Sección~\ref{sec:static} recorre la ingeniería inversa estática
+de CDM\_11 en detalle, con listings de disassembly concretos.
+La Sección~\ref{sec:runtime} describe la instrumentación en
+runtime, incluyendo las sutilezas de diseño del bypass de CIG, el
+registro de bitmap CFG, y la cadena de back-pointers por ranura.
+La Sección~\ref{sec:findings} presenta los hallazgos empíricos.
+La Sección~\ref{sec:obfuscation} trata la distribución de
+ofuscación como su propia defensa arquitectural.
+La Sección~\ref{sec:cross} establece la estabilidad
+inter-binarios e inter-fuentes.
+La Sección~\ref{sec:robustness} reporta sobre las pruebas de
+falsificación, incluyendo los hallazgos candidatos que fueron
+refutados por análisis más profundo.
+La Sección~\ref{sec:discussion} discute lo que el modelo implica
+tanto para atacantes como defensores del DRM de escritorio.
+La Sección~\ref{sec:ethics} declara qué no se hizo y por qué.
+La Sección~\ref{sec:conclusion} concluye.
 
 \begin{figure}[t]
 \centering
@@ -286,13 +305,14 @@ why. Section~\ref{sec:conclusion} concludes.
   \draw[thinarrow] (utility) -- node[right,font=\scriptsize,xshift=2pt] {\texttt{LoadLibrary}} (wvdll);
   \draw[thinarrow] (wvdll) -- node[right,font=\scriptsize,xshift=2pt] {\texttt{CreateCdmInstance(11)}} (cdmobj);
 \end{tikzpicture}
-\caption{End-to-end Widevine EME dispatch on Chromium-family browsers
-on Windows. The host browser delegates Encrypted Media Extensions
-operations through Mojo IPC to a utility process whose sole purpose is
-to load \texttt{widevinecdm.dll} and expose its CDM\_11 interface.
-This paper studies the dispatch model that sits between the
-\texttt{CreateCdmInstance}-returned interface and the per-slot
-handlers inside the library.}
+\caption{Despacho Widevine EME extremo-a-extremo en navegadores
+de la familia Chromium sobre Windows. El navegador anfitrión
+delega las operaciones de Encrypted Media Extensions vía Mojo IPC
+a un proceso utility cuyo único propósito es cargar
+\texttt{widevinecdm.dll} y exponer su interfaz CDM\_11. Este paper
+estudia el modelo de despacho que se ubica entre la interfaz
+devuelta por \texttt{CreateCdmInstance} y los handlers por-ranura
+dentro de la biblioteca.}
 \label{fig:system-overview}
 \end{figure}
 
@@ -300,242 +320,259 @@ handlers inside the library.}
 \section{Antecedentes y trabajos relacionados}
 \label{sec:antecedents}
 
-DRM reverse engineering occupies an unusual corner of security
-research: it spans applied cryptography, binary reverse engineering,
-copyright law, vendor relationships, and (sometimes) criminal
-prosecution. The methodology we follow in this paper did not emerge
-in a vacuum; it is shaped by two decades of prior work, some of
-which produced excellent technical results and some of which
-produced excellent technical results \emph{and} adverse legal
-outcomes for the researcher. This section surveys the prior art and
-explains which precedents informed the methodological choices made
-here.
+La ingeniería inversa de DRM ocupa un rincón inusual de la
+investigación en seguridad: abarca criptografía aplicada,
+ingeniería inversa de binarios, derecho de copyright, relaciones
+con vendors, y (a veces) prosecución penal. La metodología que
+seguimos en este paper no surgió en el vacío; está moldeada por
+dos décadas de trabajo previo, parte del cual produjo resultados
+técnicos excelentes y parte del cual produjo resultados técnicos
+excelentes \emph{y} consecuencias legales adversas para el
+investigador. Esta sección recorre el estado del arte previo y
+explica qué precedentes informaron las decisiones metodológicas
+tomadas aquí.
 
 \subsection{El modelo Buchanan}
 \label{sec:ante-buchanan}
 
-The methodological framework we follow is most clearly articulated
-in the recent work of David Buchanan
-\cite{buchanan-blog, buchanan-imessage, buchanan-t2}. Buchanan's
-research notably includes the reverse engineering of Apple's
-iMessage NaCl-based key wrap, the Apple T2 security chip's secure
-boot chain, and an arbitrary-image bug in the iOS image decoder
-chain (CVE-2023-4863).
+El marco metodológico que seguimos está más claramente
+articulado en el trabajo reciente de David Buchanan
+\cite{buchanan-blog, buchanan-imessage, buchanan-t2}. La
+investigación de Buchanan incluye notablemente la ingeniería
+inversa del envoltorio de clave basado en NaCl de iMessage de
+Apple, la cadena de arranque seguro del chip de seguridad T2 de
+Apple, y un bug arbitrario en imágenes en la cadena del decoder
+de imágenes de iOS (CVE-2023-4863).
 
-The defining property of Buchanan's published work, for our
-purposes, is the strict separation of \emph{architectural
-description} from \emph{exploitable artefact}. His public output
-documents how a system is structured and where its trust boundaries
-sit; the controlled proofs of concept that accompany the writeups
-demonstrate the bug class without producing a tool that
-straightforwardly enables abuse against unrelated victims. He has
-publicly described the resulting publication discipline as: probe
-everything, document the technique, publish the architecture, do
-not publish the artefact that would let arbitrary readers
-materialise the impact.
+La propiedad definitoria del trabajo publicado de Buchanan, para
+nuestros fines, es la separación estricta entre
+\emph{descripción arquitectural} y \emph{artefacto explotable}.
+Su output público documenta cómo está estructurado un sistema y
+dónde están sus fronteras de confianza; las pruebas de concepto
+controladas que acompañan los writeups demuestran la clase de bug
+sin producir una herramienta que directamente habilite el abuso
+contra víctimas no relacionadas. Él describió públicamente la
+disciplina de publicación resultante como: explorar todo,
+documentar la técnica, publicar la arquitectura, no publicar el
+artefacto que permitiría a cualquier lector materializar el
+impacto.
 
-For DRM research this distinction matters: 17~U.S.C.~§1201
-(the DMCA's anti-circumvention provision) and its international
-equivalents prohibit the publication of tools or technologies whose
-\emph{primary} use is the circumvention of a technological
-protection measure. An architectural description of a CDM is not
-such a tool. A frame ripper that consumes the same architectural
-description and produces decrypted Netflix MP4s plainly is. The
-gap is the line we are careful not to cross.
+Para investigación de DRM esta distinción importa: el 17~U.S.C.~§1201
+(la provisión anti-circumvención del DMCA) y sus equivalentes
+internacionales prohíben la publicación de herramientas o
+tecnologías cuyo uso \emph{principal} sea la circumvención de una
+medida tecnológica de protección. Una descripción arquitectural
+de un CDM no es esa clase de herramienta. Un frame ripper que
+consume la misma descripción arquitectural y produce MP4s de
+Netflix descifrados claramente sí lo es. El espacio entre ambos
+es la línea que cuidadosamente no cruzamos.
 
 \subsection{Hacking the Xbox y la tradición bunnie}
 \label{sec:ante-bunnie}
 
-Andrew ``bunnie'' Huang's work on console reverse engineering ---
-the original Xbox \cite{bunnie-xbox-book}, the NeTV project's
-HDCP-handling video pipeline \cite{bunnie-nettv}, and the Novena
-laptop --- demonstrated a sustainable model for DRM-adjacent
-research that was simultaneously useful, publishable, and not the
-subject of vendor litigation. The NeTV project in particular is
-significant: HDCP is a copyright-protection measure under U.S.
-law, and the project required EFF-coordinated correspondence with
-the Library of Congress to confirm that an architectural
-demonstration that does not capture, redistribute, or facilitate
-the redistribution of protected content remains lawful under the
-DMCA's exemption framework.
+El trabajo de Andrew ``bunnie'' Huang sobre ingeniería inversa de
+consolas --- la Xbox original \cite{bunnie-xbox-book}, el pipeline
+de video con manejo de HDCP del proyecto NeTV
+\cite{bunnie-nettv}, y la laptop Novena --- demostró un modelo
+sustentable de investigación adyacente al DRM que era
+simultáneamente útil, publicable, y no objeto de litigación por
+parte del vendor. El proyecto NeTV en particular es significativo:
+HDCP es una medida de protección de copyright bajo la ley
+estadounidense, y el proyecto requirió correspondencia coordinada
+con la EFF dirigida a la Library of Congress para confirmar que
+una demostración arquitectural que no captura, redistribuye, ni
+facilita la redistribución de contenido protegido se mantiene
+legal bajo el marco de excepciones del DMCA.
 
-Huang's recurring observation is that the legal exposure attaches
-to the \emph{exhibition} of a circumvention capability and the
-\emph{distribution} of tools that perform it, not to the act of
-characterising a system. The CDM\_11 dispatch model described in
-this paper would be obviously useful to an attacker who already
-possessed an independent capability to receive encrypted Widevine
-content and obtain valid licenses; it would be of essentially no
-use to a casual attacker who did not. That distribution of utility
-is, in our view, on the right side of the bunnie line.
+La observación recurrente de Huang es que la exposición legal se
+adhiere a la \emph{exhibición} de una capacidad de circumvención
+y a la \emph{distribución} de herramientas que la realizan, no al
+acto de caracterizar un sistema. El modelo de despacho CDM\_11
+descrito en este paper sería obviamente útil para un atacante que
+ya poseyera una capacidad independiente de recibir contenido
+Widevine cifrado y obtener licencias válidas; sería esencialmente
+inútil para un atacante casual que no la tuviera. Esa distribución
+de utilidad está, en nuestra opinión, del lado correcto de la
+línea bunnie.
 
 \subsection{Sklyarov, DVD-Jon, y la frontera legal}
 \label{sec:ante-legal}
 
-The cases of \textbf{Dimitry Sklyarov} and \textbf{Jon Lech
-Johansen} bracket the legal frontier of DRM research.
+Los casos de \textbf{Dimitry Sklyarov} y \textbf{Jon Lech
+Johansen} delimitan la frontera legal de la investigación de DRM.
 
-Sklyarov, a Russian developer for ElcomSoft, was arrested in 2001
-at DEF~CON for his work on the Advanced eBook Processor, which
-could convert Adobe's protected eBooks into PDF~\cite{sklyarov-case}.
-The prosecution proceeded against ElcomSoft (Sklyarov was eventually
-released after agreeing to testify). The arrest, the trial, and the
-eventual acquittal of ElcomSoft on the criminal charges established
-two relevant precedents: (i) prosecutors will treat a tool whose
-output is the cleartext form of a protected work as
-``primarily used to circumvent,'' even if the underlying research is
-academically defensible; (ii) merely \emph{describing} the
-circumvention technique, without distributing a tool that performs
-it, was not the basis for the prosecution.
+Sklyarov, un desarrollador ruso de ElcomSoft, fue arrestado en
+2001 durante DEF~CON por su trabajo en el Advanced eBook
+Processor, que podía convertir los eBooks protegidos de Adobe en
+PDF~\cite{sklyarov-case}. La prosecución procedió contra
+ElcomSoft (Sklyarov fue eventualmente liberado tras aceptar
+testificar). El arresto, el juicio, y la eventual absolución de
+ElcomSoft sobre los cargos penales establecieron dos precedentes
+relevantes: (i) los fiscales van a tratar a una herramienta cuya
+salida es la forma en texto plano de una obra protegida como
+``usada primariamente para circunvenir'', aunque la investigación
+subyacente sea académicamente defendible; (ii) meramente
+\emph{describir} la técnica de circumvención, sin distribuir una
+herramienta que la realice, no fue la base de la prosecución.
 
-Jon Lech Johansen, ``DVD-Jon,'' was prosecuted by Norwegian
-authorities (acquitted twice, eventually finally) for his role in
-the development of DeCSS, the tool that broke CSS scrambling on
-DVDs~\cite{dvdjon-norway}. The Norwegian courts held that
-Johansen's work on his \emph{own} DVD player was lawful, even
-though the resulting tool was redistributed widely on the
-internet. The U.S. case of \emph{Universal v.~Reimerdes} held that
-the \emph{posting} of DeCSS on a website was actionable circumvention
-of the DMCA, regardless of the lawfulness of the underlying
-research~\cite{decss-2600}.
+Jon Lech Johansen, ``DVD-Jon'', fue procesado por las autoridades
+noruegas (absuelto dos veces, finalmente definitivamente) por su
+rol en el desarrollo de DeCSS, la herramienta que rompió el
+scrambling CSS en los DVDs~\cite{dvdjon-norway}. Los tribunales
+noruegos sostuvieron que el trabajo de Johansen sobre su
+\emph{propio} reproductor de DVD era legal, aunque la herramienta
+resultante haya sido redistribuida ampliamente en internet. El
+caso estadounidense de \emph{Universal v.~Reimerdes} sostuvo que
+la \emph{publicación} de DeCSS en un sitio web era circumvención
+accionable del DMCA, sin importar la legalidad de la
+investigación subyacente~\cite{decss-2600}.
 
-The composite lesson from these cases informs our publication
-discipline: an architectural description is not a tool; a tool that
-materialises decrypted content is a tool. We publish the
-architectural description and the controlled validation framework
-that proves the description correct; we do not publish a tool.
+La lección compuesta de estos casos informa nuestra disciplina de
+publicación: una descripción arquitectural no es una herramienta;
+una herramienta que materializa contenido descifrado sí es una
+herramienta. Publicamos la descripción arquitectural y el marco
+de validación controlada que prueba que la descripción es
+correcta; no publicamos una herramienta.
 
 \subsection{Trabajo académico sobre Widevine}
 \label{sec:ante-widevine}
 
-The Widevine ecosystem has received attention from several academic
-and corporate-research groups, primarily focused on the Android L3
-variant.
+El ecosistema Widevine ha recibido atención desde varios grupos
+académicos y corporativos, principalmente enfocados en la
+variante Android L3.
 
-\textbf{Quarkslab} published a series of analyses of Widevine on
+\textbf{Quarkslab} publicó una serie de análisis de Widevine en
 Android beginning in 2018~\cite{quarkslab-widevine,
 quarkslab-android-widevine}. Their work characterised the
 OEMCrypto-protected components of the Widevine SDK and demonstrated
 that the L3 keybox-based protection model relied substantially on
 software obfuscation that could be peeled back with whitebox-crypto
-attack techniques. The L3 decryptor projects~\cite{l3-decryptor,
-ango-l3-decryptor} that followed --- mostly published as
-research-grade open-source --- demonstrated end-to-end Widevine~L3
-content extraction from the protected library. Google's response was
-to deprecate L3 web-browser support and accelerate the migration to
-L1.
+técnicas de ataque. Los proyectos del L3 decryptor que siguieron
+\cite{l3-decryptor, ango-l3-decryptor} --- la mayoría publicados
+como open-source de calidad investigación --- demostraron
+extracción extremo-a-extremo de contenido Widevine~L3 desde la
+biblioteca protegida. La respuesta de Google fue deprecar el
+soporte de L3 en navegadores web y acelerar la migración a L1.
 
-\textbf{Check Point Research} has periodically analysed Widevine on
-Android handsets, identifying specific keybox extraction
-vulnerabilities and bug classes in the OEMCrypto
-TrustZone~\cite{checkpoint-widevine}. Their reports
-were coordinated with Google and the vendor before publication.
+\textbf{Check Point Research} ha analizado periódicamente Widevine
+sobre handsets Android, identificando vulnerabilidades específicas
+de extracción de keybox y clases de bugs en la TrustZone de
+OEMCrypto~\cite{checkpoint-widevine}. Sus reportes fueron
+coordinados con Google y el vendor antes de su publicación.
 
-\textbf{Romain Thomas and collaborators} at Quarkslab have published
-extensively on practical reverse engineering tools that we use here,
-including the LIEF library for cross-platform binary parsing
-\cite{lief-tool} and several blog posts on whitebox crypto in
-commercial DRM. Their tool work is directly upstream of the
-methodology used in this paper for static analysis of
-\texttt{widevinecdm.dll}.
+\textbf{Romain Thomas y colaboradores} de Quarkslab han publicado
+extensamente sobre herramientas prácticas de ingeniería inversa
+que usamos aquí, incluyendo la biblioteca LIEF para parsing
+multiplataforma de binarios \cite{lief-tool} y varios posts de
+blog sobre whitebox crypto en DRM comercial. Su trabajo en
+herramientas está directamente upstream de la metodología usada
+en este paper para análisis estático de \texttt{widevinecdm.dll}.
 
-There is, to our knowledge, no published academic study of the
-Windows L1 CDM dispatch internals as such. The work nearest in
-spirit is a handful of blog posts and forum threads that document
-specific issues (e.g., the \texttt{libwidevinecdm.so} symbol layout
-on Linux, the CDM ABI changes between major versions) without
-proposing a generalisable architectural model. This is the gap the
-present paper attempts to fill for the Windows L1 build.
+No existe, hasta donde sabemos, ningún estudio académico publicado
+sobre los internals de despacho del CDM L1 de Windows como tal. El
+trabajo más cercano en espíritu es un puñado de posts de blog y
+threads de foros que documentan issues específicos (por ejemplo,
+el layout de símbolos de \texttt{libwidevinecdm.so} en Linux, los
+cambios de ABI del CDM entre versiones mayores) sin proponer un
+modelo arquitectural generalizable. Esa es la brecha que el
+presente paper intenta llenar para el build L1 de Windows.
 
 \subsection{Criptografía whitebox y ofuscación MBA}
 \label{sec:ante-whitebox}
 
-The obfuscation patterns observed in CDM\_11 layer-3 handlers ---
-high-entropy magic constants written to the stack at function entry,
-multiplicative-hash state-advance instructions, branchless
-\texttt{cmovae} cascades, \texttt{0xaaaaaaaa} poison fills --- match
-the textbook signature of \emph{mixed-boolean-arithmetic} (MBA)
-obfuscation as treated in the academic
-literature~\cite{eyrolles-mba, biondi-mba}. MBA obfuscation
-transforms an arithmetic operation into an equivalent expression
-that mixes bitwise and arithmetic operations in a way that defeats
-algebraic simplification on the obfuscated form. It is widely used
-in commercial software protection products (VMProtect, Themida,
-Arxan) and in custom obfuscators built by vendors for specific
-defensive use cases.
+Los patrones de ofuscación observados en los handlers de capa-3
+de CDM\_11 --- constantes mágicas de alta entropía escritas al
+stack en la entrada de la función, instrucciones de avance de
+estado por hash multiplicativo, cascadas \texttt{cmovae} sin
+branches, rellenos de poison \texttt{0xaaaaaaaa} --- coinciden con
+la firma de libro de texto de la ofuscación
+\emph{mixed-boolean-arithmetic} (MBA) tal como se trata en la
+literatura académica~\cite{eyrolles-mba, biondi-mba}. La ofuscación
+MBA transforma una operación aritmética en una expresión
+equivalente que mezcla operaciones bit-a-bit y aritméticas de modo
+que derrota la simplificación algebraica sobre la forma ofuscada.
+Se usa ampliamente en productos comerciales de protección de
+software (VMProtect, Themida, Arxan) y en ofuscadores a medida
+construidos por vendors para casos defensivos específicos.
 
-A distinct but related technique, \emph{whitebox cryptography},
-embeds cryptographic key material into table-based representations
-that resist direct extraction even when the attacker has full read
-access to the obfuscated code~\cite{chow-aes-whitebox, lepoint-whitebox}.
-Commercial DRM products use whitebox-AES variants extensively;
-the encrypted keys in a Widevine L3 license are unwrapped by
-exactly such a routine before being applied to the per-frame
-decryption.
+Una técnica distinta pero relacionada, la \emph{criptografía
+whitebox}, embebe material de clave criptográfica en
+representaciones basadas en tablas que resisten la extracción
+directa incluso cuando el atacante tiene acceso completo de
+lectura al código ofuscado~\cite{chow-aes-whitebox,
+lepoint-whitebox}. Los productos comerciales de DRM usan variantes
+de whitebox-AES extensivamente; las claves cifradas en una
+licencia Widevine L3 son desenvueltas por exactamente esa clase
+de rutina antes de ser aplicadas al descifrado por-cuadro.
 
-The pattern we report in Section~\ref{sec:obfuscation} ---
-obfuscation concentrated at the depth where structured attacker
-data begins to be parsed --- is consistent with the design
-prescription of the whitebox literature: protect the cryptographic
-processor, not the dispatch glue around it. Whether the protection
-\emph{succeeds} against a determined attacker is a separate
-question we do not address.
+El patrón que reportamos en la Sección~\ref{sec:obfuscation} ---
+ofuscación concentrada a la profundidad donde los datos
+estructurados del atacante empiezan a ser parseados --- es
+consistente con la prescripción de diseño de la literatura
+whitebox: proteger al procesador criptográfico, no el pegamento
+de despacho a su alrededor. Si la protección \emph{tiene éxito}
+contra un atacante determinado es una pregunta separada que no
+abordamos.
 
 \subsection{Antecedentes de herramientas}
 \label{sec:ante-tools}
 
-Three concrete pieces of tooling that this work relies on deserve
-acknowledgement:
+Tres piezas concretas de herramientas en las que se apoya este
+trabajo merecen reconocimiento:
 
-\textbf{Capstone}~\cite{capstone-tool}, the multi-architecture
-disassembly framework used by every script in this release that
-walks \texttt{widevinecdm.dll}'s \texttt{.text} section.
+\textbf{Capstone}~\cite{capstone-tool}, el framework de
+disassembly multi-arquitectura usado por cada script en este
+release que recorre la sección \texttt{.text} de
+\texttt{widevinecdm.dll}.
 
-\textbf{pefile}~\cite{pefile-tool}, the pure-Python PE parser used
-to enumerate exports, walk the section table, and read RVAs from
-\texttt{.rdata}.
+\textbf{pefile}~\cite{pefile-tool}, el parser PE puro de Python
+usado para enumerar exports, recorrer la tabla de secciones, y
+leer RVAs desde \texttt{.rdata}.
 
-\textbf{mingw-w64}, the Windows cross-toolchain used to build the
-shim and the helpers from a Linux host. Notably, mingw-w64's
-gcc backend does not support Microsoft's structured exception
-handling \texttt{\_\_try / \_\_except}, which forced us to use
-\texttt{VirtualQuery}-based safety checks for the shim's
-register-target read paths instead of SEH-protected
-\texttt{memcpy}. This is the kind of small implementation detail
-that doesn't appear in glossy DRM-research literature but determines
-whether the methodology runs at all.
+\textbf{mingw-w64}, la cross-toolchain de Windows usada para
+construir el shim y los helpers desde un host Linux. Notablemente,
+el backend de gcc de mingw-w64 no soporta el structured exception
+handling \texttt{\_\_try / \_\_except} de Microsoft, lo que nos
+forzó a usar checks de seguridad basados en \texttt{VirtualQuery}
+para los caminos de lectura del shim que usan registers como
+target, en lugar de \texttt{memcpy} protegido por SEH. Esta es la
+clase de pequeño detalle de implementación que no aparece en la
+literatura llamativa de investigación de DRM pero que determina
+si la metodología corre o no.
 
 % =============================================================================
 \section{Marco técnico}
 \label{sec:background}
 
-This section reviews the major technical components of the
-Windows L1 Widevine playback pipeline in greater depth than the
-introduction permitted.
+Esta sección revisa los componentes técnicos principales del
+pipeline de reproducción Widevine L1 de Windows en mayor
+profundidad de la que permitió la introducción.
 
 \subsection{Niveles de licencia de Widevine}
 \label{sec:bg-levels}
 
-Widevine defines three nested security levels.
+Widevine define tres niveles de seguridad anidados.
 
-\textbf{L3} is a pure-software CDM. Cryptographic state is held in
-process memory inside an obfuscated runtime. Content keys are
-unwrapped by a whitebox-style cryptographic core and applied to
-ciphertext segments in user-space buffers. Decrypted output is
-returned to the host through standard memory. Per the published
-Widevine licensing policy, L3-only clients top out at 540p; content
-owners' deals frequently restrict L3 to lower bitrates than L2/L1
-clients receive.
+\textbf{L3} es un CDM puramente software. El estado criptográfico
+se mantiene en memoria del proceso dentro de un runtime ofuscado.
+Las claves de contenido se desenvuelven mediante un núcleo
+criptográfico estilo whitebox y se aplican a segmentos de
+ciphertext en buffers user-space. La salida descifrada se devuelve
+al anfitrión a través de memoria estándar. Según la política de
+licencia Widevine publicada, los clientes solo-L3 tienen techo en
+540p; los acuerdos de los dueños de contenido frecuentemente
+restringen L3 a tasas de bits más bajas que las que reciben los
+clientes L2/L1.
 
-\textbf{L2} is a hybrid: a software CDM holds at least its
-sensitive operations behind a hardware-backed Trusted Execution
-Environment (TEE) on the host. L2 sees limited deployment on
-desktop.
+\textbf{L2} es híbrido: un CDM software mantiene al menos sus
+operaciones sensibles detrás de un Trusted Execution Environment
+(TEE) respaldado por hardware en el anfitrión. L2 ve un deployment
+limitado en escritorio.
 
-\textbf{L1}, the variant studied in this paper, requires the host
-to provide a hardware-backed protected media pipeline. On Windows
-the relevant pipeline is Protected Media Path (PMP), itself a
-composite of:
+\textbf{L1}, la variante estudiada en este paper, requiere que el
+anfitrión provea un pipeline de medios protegido respaldado por
+hardware. En Windows el pipeline relevante es el Protected Media
+Path (PMP), él mismo un compuesto de:
 
 \begin{itemize}[itemsep=0pt,topsep=2pt]
   \item \texttt{peauth.sys}, the Microsoft-signed kernel-mode
@@ -556,46 +593,49 @@ exploits to demonstrate the CDM dormancy phenomenon.
 \subsection{Encrypted Media Extensions and the dispatch path}
 \label{sec:bg-eme}
 
-The W3C Encrypted Media Extensions specification~\cite{w3c-eme}
-defines the JavaScript API by which a web application requests
-DRM-mediated playback of an encrypted media stream. From the host
-browser's point of view, the relevant operations are:
+La especificación W3C Encrypted Media Extensions~\cite{w3c-eme}
+define la API de JavaScript por la cual una aplicación web
+solicita reproducción mediada por DRM de un stream de medios
+cifrado. Desde el punto de vista del navegador anfitrión, las
+operaciones relevantes son:
 
 \begin{enumerate}[itemsep=2pt,topsep=2pt]
   \item \texttt{navigator.requestMediaKeySystemAccess(}
-        \texttt{``com.widevine.alpha''}\texttt{)}: confirm that the
-        client has a CDM for the named key system.
-  \item Create a \texttt{MediaKeys} object and bind it to an
+        \texttt{``com.widevine.alpha''}\texttt{)}: confirma que
+        el cliente tiene un CDM para el key system nombrado.
+  \item Crear un objeto \texttt{MediaKeys} y vincularlo a un
         \texttt{HTMLMediaElement}.
-  \item Wait for the \texttt{encrypted} event, which provides the
-        Common Encryption (CENC) initialisation data extracted from
-        the media stream.
-  \item Create a \texttt{MediaKeySession} and call
-        \texttt{generateRequest(initDataType, initData)}, which
-        causes the CDM to construct a license request.
-  \item Forward the resulting message to the licensing server,
-        receive the response, and feed it back via
+  \item Esperar el evento \texttt{encrypted}, que provee los
+        datos de inicialización Common Encryption (CENC)
+        extraídos del stream de medios.
+  \item Crear una \texttt{MediaKeySession} y llamar a
+        \texttt{generateRequest(initDataType, initData)}, lo que
+        causa que el CDM construya un request de licencia.
+  \item Reenviar el mensaje resultante al servidor de licencias,
+        recibir la respuesta, y devolverla vía
         \texttt{updateSession(licenseResponse)}.
-  \item Continue playback as the CDM unwraps content keys and
-        applies them to the encrypted media data.
+  \item Continuar la reproducción mientras el CDM desenvuelve
+        las claves de contenido y las aplica a los datos del
+        medio cifrado.
 \end{enumerate}
 
-Chromium's implementation of this API routes each step through the
-browser process, the renderer, and the CDM utility process via Mojo
-IPC interfaces defined in
-\texttt{chromium/components/cdm}~\cite{chromium-cdm-mojo}. The
-relevant Mojo interface for our purposes is
-\texttt{media.mojom.ContentDecryptionModule}, whose request and
-response messages are essentially a serialised projection of the
-nineteen-method CDM\_11 C++ interface.
+La implementación de Chromium de esta API enruta cada paso a
+través del proceso navegador, el renderer, y el proceso utility
+del CDM vía interfaces Mojo IPC definidas en
+\texttt{chromium/components/cdm}~\cite{chromium-cdm-mojo}. La
+interfaz Mojo relevante para nuestros fines es
+\texttt{media.mojom.ContentDecryptionModule}, cuyos mensajes de
+request y response son esencialmente una proyección serializada
+de la interfaz C++ de diecinueve métodos de CDM\_11.
 
-\subsection{The CDM\_11 C++ interface}
+\subsection{La interfaz C++ de CDM\_11}
 \label{sec:bg-cdm11}
 
-The interface CDM\_11 implements is defined in the Chromium tree at
-\texttt{media/cdm/api/content\_decryption\_module.h}. The class is
-a pure-virtual base \texttt{ContentDecryptionModule\_11} with the
-following nineteen entries, declared in this order:
+La interfaz que CDM\_11 implementa está definida en el árbol de
+Chromium en
+\texttt{media/cdm/api/content\_decryption\_module.h}. La clase es
+una base puramente virtual \texttt{ContentDecryptionModule\_11}
+con las siguientes diecinueve entradas, declaradas en este orden:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 virtual void Initialize(...) = 0;
@@ -619,25 +659,27 @@ virtual void OnQueryOutputProtectionStatus(...) = 0;
 virtual void OnStorageId(...) = 0;
 \end{lstlisting}
 
-Each virtual call translates, under the Microsoft x64 calling
-convention, into a single indirect call through a function pointer
-loaded from the object's vtable. The vtable layout for a class with
-nineteen virtual functions and no base-class virtuals is a
-nineteen-entry contiguous array of code pointers; the per-call
-overhead from the host's perspective is one indirect load plus the
-CFG dispatcher cost.
+Cada llamada virtual se traduce, bajo la convención de llamada
+x64 de Microsoft, en una única llamada indirecta a través de un
+function pointer cargado desde la vtable del objeto. El layout de
+la vtable para una clase con diecinueve funciones virtuales y sin
+virtuales de clase base es un arreglo contiguo de diecinueve
+punteros a código; el overhead por llamada desde la perspectiva
+del anfitrión es una carga indirecta más el costo del dispatcher
+CFG.
 
-We adopt the convention of identifying CDM\_11 methods by their slot
-index throughout this paper. \texttt{Decrypt} is slot 9,
-\texttt{DecryptAndDecodeFrame} is slot 14, and so on.
+Adoptamos la convención de identificar los métodos CDM\_11 por su
+índice de ranura a lo largo de este paper. \texttt{Decrypt} es la
+ranura 9, \texttt{DecryptAndDecodeFrame} es la ranura 14, y así.
 
-\subsection{Common Encryption (CENC) and PSSH}
+\subsection{Common Encryption (CENC) y PSSH}
 \label{sec:bg-cenc}
 
-The Widevine protocol carries its initialisation data inside a
-Protection-Specific System Header (PSSH) box, as standardised by
-ISO/IEC 23001-7 (Common Encryption for ISO Base Media File
-Format)~\cite{iso-cenc, w3c-pssh}. A PSSH box is structured:
+El protocolo Widevine transporta sus datos de inicialización
+dentro de una caja Protection-Specific System Header (PSSH), tal
+como está estandarizada en ISO/IEC 23001-7 (Common Encryption
+para ISO Base Media File Format)~\cite{iso-cenc, w3c-pssh}. Una
+caja PSSH está estructurada así:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 PSSHBox {
@@ -655,38 +697,40 @@ PSSHBox {
 }
 \end{lstlisting}
 
-The \texttt{data} field, for Widevine, contains a Protocol Buffers
-serialisation of a \texttt{WidevineCencHeader} message with a known
-schema. The \texttt{generateRequest} call passes the entire PSSH box
-to the CDM, which parses out the SystemID, the KIDs, and the
-protobuf-encoded header to construct a license request.
+El campo \texttt{data}, para Widevine, contiene una serialización
+Protocol Buffers de un mensaje \texttt{WidevineCencHeader} con un
+esquema conocido. La llamada \texttt{generateRequest} pasa la caja
+PSSH completa al CDM, que parsea el SystemID, los KIDs, y el
+header codificado en protobuf para construir un request de
+licencia.
 
-This is the attacker-controllable structured input that the
-\texttt{CreateSessionAndGenerateRequest} slot (slot 3) ingests:
-a malicious DASH manifest or a malicious EME application can place
-arbitrary bytes inside the PSSH and pass them to the CDM with full
-control over both the box header fields and the protobuf payload.
-Parser vulnerabilities in the CDM's PSSH path are
-attacker-reachable from any compromised CDN that serves the DASH
-manifest, from any compromised JavaScript that drives the EME
-application, or from any MITM attacker who can rewrite the DASH
-manifest in transit.
+Este es el input estructurado atacante-controlable que ingiere la
+ranura \texttt{CreateSessionAndGenerateRequest} (ranura 3): un
+manifest DASH malicioso o una aplicación EME maliciosa puede
+colocar bytes arbitrarios dentro del PSSH y pasarlos al CDM con
+control total tanto sobre los campos del header de la caja como
+del payload protobuf. Las vulnerabilidades de parser en el camino
+PSSH del CDM son alcanzables por atacantes desde cualquier CDN
+comprometido que sirve el manifest DASH, desde cualquier JavaScript
+comprometido que conduce la aplicación EME, o desde cualquier
+atacante MITM que pueda reescribir el manifest DASH en tránsito.
 
-The two standard CENC encryption schemes that the CDM must support
-are \textbf{CENC-CTR} (AES-128 in Counter mode, with subsample
-descriptors that indicate which byte ranges of the encrypted track
-are protected) and \textbf{CBCS} (AES-128 in CBC mode with
-\emph{pattern} encryption: a 1-in-10 or 1-in-9 pattern of
-encrypted-skipped blocks designed to be tolerable to AVC/HEVC NALU
-boundaries). The CDM\_11 \texttt{InputBuffer\_2} structure carries
-both schemes and their subsample / pattern parameters per call.
+Los dos esquemas estándar de cifrado CENC que el CDM debe soportar
+son \textbf{CENC-CTR} (AES-128 en modo Counter, con descriptores
+de subsample que indican qué rangos de bytes del track cifrado
+están protegidos) y \textbf{CBCS} (AES-128 en modo CBC con
+cifrado por \emph{patrón}: un patrón 1-de-10 o 1-de-9 de bloques
+cifrados-salteados diseñado para tolerar los límites de NALU de
+AVC/HEVC). La estructura \texttt{InputBuffer\_2} de CDM\_11
+transporta ambos esquemas y sus parámetros de subsample/patrón
+por llamada.
 
-\subsection{Mojo IPC and the CDM utility process}
+\subsection{Mojo IPC y el proceso utility del CDM}
 \label{sec:bg-mojo}
 
-Chromium isolates the CDM in a dedicated utility process to confine
-the impact of CDM compromise. The utility process is spawned with
-the command line:
+Chromium aísla al CDM en un proceso utility dedicado para
+confinar el impacto del compromiso del CDM. El proceso utility se
+spawnea con la línea de comando:
 
 \begin{lstlisting}[basicstyle=\ttfamily\tiny]
 chrome.exe --type=utility
@@ -696,46 +740,51 @@ chrome.exe --type=utility
            ...
 \end{lstlisting}
 
-Inside the utility, a Mojo interface implementation accepts the
-host's CDM requests and forwards them to a C++ class that owns a
-single \texttt{ContentDecryptionModule\_11} pointer. That pointer
-points at the object returned by
+Dentro del utility, una implementación de interfaz Mojo acepta
+los requests CDM del anfitrión y los reenvía a una clase C++ que
+posee un único puntero a
+\texttt{ContentDecryptionModule\_11}. Ese puntero apunta al objeto
+devuelto por
 \texttt{widevinecdm.dll!CreateCdmInstance(11, \ldots)} ---
-which is the object whose vtable we map in Section~\ref{sec:static}.
+que es el objeto cuya vtable mapeamos en la
+Sección~\ref{sec:static}.
 
-\subsection{Control Flow Guard and Code Integrity Guard}
+\subsection{Control Flow Guard y Code Integrity Guard}
 \label{sec:bg-cfg-cig}
 
-Two Windows process-level mitigations are relevant to the runtime
-instrumentation of the CDM utility:
+Dos mitigaciones a nivel de proceso de Windows son relevantes
+para la instrumentación en runtime del utility del CDM:
 
-\textbf{Code Integrity Guard (CIG)} is the process mitigation
-policy \texttt{PROCESS\_CREATION\_MITIGATION\_POLICY\_BLOCK\_NON\_\\MICROSOFT\_BINARIES\_ALWAYS\_ON}.
-When enabled, the kernel refuses to load any DLL into the process
-that is not signed by Microsoft or a Microsoft partner. Chrome
-enables CIG on its renderer and utility processes by default since
-Chrome 70~\cite{chromium-cig}. The flag
-\texttt{--disable-features=RendererCodeIntegrity}, in combination
-with \texttt{--no-sandbox} on the affected processes, disables CIG
-for research use.
+\textbf{Code Integrity Guard (CIG)} es la política de mitigación
+de proceso \texttt{PROCESS\_CREATION\_MITIGATION\_POLICY\_BLOCK\_NON\_\\MICROSOFT\_BINARIES\_ALWAYS\_ON}.
+Cuando está habilitada, el kernel rechaza cargar cualquier DLL al
+proceso que no esté firmado por Microsoft o un partner de
+Microsoft. Chrome habilita CIG en sus procesos renderer y utility
+por default desde Chrome 70~\cite{chromium-cig}. La flag
+\texttt{--disable-features=RendererCodeIntegrity}, en combinación
+con \texttt{--no-sandbox} en los procesos afectados, deshabilita
+CIG para uso de investigación.
 
-\textbf{Control Flow Guard (CFG)} is a Microsoft compiler-level
-mitigation that adds a kernel-validated bitmap of valid indirect-call
-targets to the running process and inserts a check before each
-indirect call~\cite{microsoft-cfg}. A patched vtable that points
-at a hook function we just allocated is not in the bitmap by
-default, so the first call through the patched slot triggers a CFG
-failure that terminates the process.
+\textbf{Control Flow Guard (CFG)} es una mitigación a nivel de
+compilador de Microsoft que agrega un bitmap validado por kernel
+de targets válidos de indirect-call al proceso corriendo e
+inserta un check antes de cada indirect call~\cite{microsoft-cfg}.
+Una vtable parcheada que apunta a una función hook que recién
+asignamos no está en el bitmap por default, así que la primera
+llamada por la ranura parcheada dispara un fallo CFG que termina
+el proceso.
 
-The supported way to mark a new function as a valid call target is
-the \texttt{SetProcessValidCallTargets} API
-\cite{ms-spvct-docs}. The API takes a process handle, a 4~KB-aligned
-page base, a page size, and an array of \texttt{CFG\_CALL\_TARGET\_INFO}
-descriptors whose \texttt{Offset} field is the \emph{in-page offset}
-(low 12 bits) of the target. An early version of our injector used
-the low 16 bits, which is wrong, the page-allocation backing the
-hook is 4~KB and the bitmap is indexed at 16-byte granularity within
-the page. The released injector uses the correct mask:
+La forma soportada de marcar una nueva función como target válido
+es la API \texttt{SetProcessValidCallTargets}
+\cite{ms-spvct-docs}. La API toma un handle de proceso, una base
+de página alineada a 4~KB, un tamaño de página, y un array de
+descriptores \texttt{CFG\_CALL\_TARGET\_INFO} cuyo campo
+\texttt{Offset} es el \emph{offset intra-página} (12 bits bajos)
+del target. Una versión temprana de nuestro injector usó los 16
+bits bajos, lo cual está mal: la página que respalda al hook es
+de 4~KB y el bitmap se indexa con granularidad de 16 bytes
+dentro de la página. El injector liberado usa la máscara
+correcta:
 
 \begin{lstlisting}[language=C, basicstyle=\ttfamily\scriptsize]
 CFG_CALL_TARGET_INFO cti;
@@ -746,20 +795,22 @@ SetProcessValidCallTargets(hProc, (PVOID)pageBase,
                             0x1000, 1, &cti);
 \end{lstlisting}
 
-\subsection{ASLR and the shared DLL view}
+\subsection{ASLR y la vista compartida del DLL}
 \label{sec:bg-aslr}
 
-A practical implementation detail of significance to our cross-tab
-experiment (Section~\ref{sec:findings-cross}): Chrome's utility
-processes load \texttt{widevinecdm.dll} from the same on-disk image
-each time, and Windows' image-section sharing means that two
-separate utility processes both end up with the DLL mapped at the
-\emph{same virtual address}. This is why our injector's hook
-addresses (in the shim's image, at the shim's reserved load base)
-were identical between Netflix's CDM utility process and Bitmovin's
-CDM utility process. The data section of the DLL is, however,
-copy-on-write per process; each utility has its own counters and
-its own opened log file handle.
+Un detalle práctico de implementación relevante a nuestro
+experimento entre pestañas (Sección~\ref{sec:findings-cross}):
+los procesos utility de Chrome cargan
+\texttt{widevinecdm.dll} desde la misma imagen en disco cada vez,
+y la compartición de image-sections de Windows significa que dos
+procesos utility separados ambos terminan con el DLL mapeado en
+la \emph{misma dirección virtual}. Por eso las direcciones de
+hook de nuestro injector (en la imagen del shim, en la base de
+carga reservada del shim) fueron idénticas entre el proceso
+utility del CDM de Netflix y el de Bitmovin. Sin embargo, la
+sección de datos del DLL es copy-on-write por proceso; cada
+utility tiene sus propios contadores y su propio file handle de
+log abierto.
 
 % =============================================================================
 \section{Modelo de amenaza y metodología}
@@ -768,117 +819,127 @@ its own opened log file handle.
 \subsection{Modelo de amenaza}
 \label{sec:threat-model}
 
-We consider an honest user of a Chromium-family browser playing
-hardware-decoded Widevine-protected content on Windows 11. The user
-has consented to research-grade instrumentation of their own browser
-and has installed our reverse-engineering tools on their own
-laboratory machine. The browser executable is unmodified and signed
-by the vendor. The Widevine CDM is the vendor-shipped
-\texttt{widevinecdm.dll} of the installed browser version. The user
-holds a valid, paid subscription to the commercial streaming
-service used in the empirical sections of the paper, and the use
-of that subscription is for personal viewing during the research
-window. No second user, no jurisdiction outside the user's own, and
-no third-party content are involved.
+Consideramos a un usuario honesto de un navegador de la familia
+Chromium reproduciendo contenido Widevine-protegido con
+decodificación por hardware en Windows 11. El usuario ha
+consentido a la instrumentación nivel-investigación de su propio
+navegador y ha instalado nuestras herramientas de ingeniería
+inversa en su propia máquina de laboratorio. El ejecutable del
+navegador no está modificado y está firmado por el vendor. El CDM
+Widevine es el \texttt{widevinecdm.dll} provisto por el vendor de
+la versión del navegador instalado. El usuario posee una
+suscripción válida y paga al servicio comercial de streaming
+usado en las secciones empíricas del paper, y el uso de esa
+suscripción es para visualización personal durante la ventana de
+investigación. No hay segundo usuario, ni jurisdicción fuera de la
+propia del usuario, ni contenido de terceros involucrado.
 
-We deliberately exclude from this study any threat model in which
-an attacker captures decrypted frames. Our concern is not the
-exploitation potential of the CDM but its architectural shape and
-the attack surface it presents to the host browser and to the
-network attacker positioned between the browser and the streaming
-CDN.
+Excluimos deliberadamente de este estudio cualquier modelo de
+amenaza en el que un atacante capture cuadros descifrados.
+Nuestra preocupación no es el potencial de explotación del CDM
+sino su forma arquitectural y la superficie de ataque que
+presenta al navegador anfitrión y al atacante de red posicionado
+entre el navegador y el CDN del streaming.
 
 \subsection{Invariantes de la metodología}
 \label{sec:threat-invariants}
 
-We follow what we describe as the \emph{Buchanan model} of DRM
-research, summarised earlier (Section~\ref{sec:ante-buchanan}). The
-working version of the model that governed every experimental
-decision in this paper is:
+Seguimos lo que describimos como el \emph{modelo Buchanan} de
+investigación de DRM, resumido anteriormente
+(Sección~\ref{sec:ante-buchanan}). La versión operativa del
+modelo que gobernó cada decisión experimental en este paper es:
 
 \begin{enumerate}[itemsep=2pt,topsep=2pt]
-  \item \textbf{Shape-only observation.} Any runtime hook is
-        permitted to log dispatch metadata --- slot number,
-        timestamp, register value hashes, structure-size fields ---
-        but is forbidden from copying any pointer-target bytes
-        belonging to ciphertext, decrypted frames, content key
-        material, or initialisation vectors into any persistent
-        storage or any out-of-process channel. The shim source
-        encodes this invariant explicitly: there is no code path
-        that calls \texttt{memcpy(\&log\_buf, ib.data, \dots)};
-        the shape extractor reads only the \texttt{size} fields,
-        an FNV-1a-32 hash of the first 16 bytes of \texttt{key\_id},
-        a non-zero presence flag for the IV, and a handful of public
-        scalar fields.
-  \item \textbf{Provable absence.} After every experiment we
-        forensically verify that the storage produced is pure ASCII
-        JSON consisting only of the permitted metadata fields and
-        contains no binary blobs, no decoded content, and no key
-        material. We document the verification procedure in
-        Section~\ref{sec:ethics} and provide the verifier script
-        in the released methodology.
-  \item \textbf{Reversible mutation.} All runtime modifications to
-        the target process (vtable patches, hook installations, CFG
-        bitmap registrations) are reversible. We save the
-        pre-patch state on the wire to the released tooling and
-        restore the target to its original state before publishing.
-        The released helper retains the original outer-vtable
-        thunk addresses in the shim's
-        \texttt{g\_pOrigSlot[19]} array so that an external observer
-        can validate that the post-experiment state is byte-equal
-        to the pre-experiment state.
-  \item \textbf{No content circumvention surface.} We use the
-        operator's own browser session to a commercial streaming
-        service to confirm what the CDM does during steady state,
-        but we never instrument the decoder, the kernel-side PMP
-        component (\texttt{peauth.sys}), the protected surface, or
-        any other component positioned to materialise a decrypted
-        frame. The shape-only shim is the deepest hook in the
-        stack we install.
-  \item \textbf{Falsification before publication.} Every empirical
-        claim is subjected to a falsification test: an alternative
-        hypothesis that, if true, would invalidate the claim, is
-        constructed and tested with whatever evidence the methodology
-        can produce. Section~\ref{sec:robustness} reports the
-        falsification sprint.
+  \item \textbf{Observación shape-only.} A cualquier hook runtime
+        se le permite registrar metadata de despacho --- número de
+        ranura, timestamp, hashes de valores de registros, campos
+        de tamaño de estructura --- pero se le prohíbe copiar
+        cualquier byte apuntado por puntero perteneciente a
+        ciphertext, cuadros descifrados, material de clave de
+        contenido, o vectores de inicialización, hacia cualquier
+        almacenamiento persistente o cualquier canal fuera del
+        proceso. El código fuente del shim codifica esta
+        invariante explícitamente: no existe camino de código
+        que llame a \texttt{memcpy(\&log\_buf, ib.data, \dots)};
+        el extractor de forma sólo lee los campos \texttt{size},
+        un hash FNV-1a-32 de los primeros 16 bytes de
+        \texttt{key\_id}, una flag de presencia distinta-de-cero
+        para el IV, y un puñado de campos escalares públicos.
+  \item \textbf{Ausencia demostrable.} Después de cada experimento
+        verificamos forensicamente que el almacenamiento producido
+        es JSON puro ASCII consistente sólo de los campos de
+        metadata permitidos y no contiene blobs binarios, ni
+        contenido decodificado, ni material de clave. Documentamos
+        el procedimiento de verificación en la
+        Sección~\ref{sec:ethics} y proveemos el script verificador
+        en la metodología liberada.
+  \item \textbf{Mutación reversible.} Todas las modificaciones
+        runtime al proceso target (parches de vtable,
+        instalaciones de hook, registros de bitmap CFG) son
+        reversibles. Guardamos el estado pre-parche en formato
+        wire al tooling liberado y restauramos el target a su
+        estado original antes de publicar. El helper liberado
+        retiene las direcciones originales de los thunks de la
+        outer-vtable en el array \texttt{g\_pOrigSlot[19]} del
+        shim para que un observador externo pueda validar que el
+        estado post-experimento es byte-igual al estado
+        pre-experimento.
+  \item \textbf{Sin superficie de circumvención de contenido.}
+        Usamos la propia sesión de navegador del operador a un
+        servicio comercial de streaming para confirmar qué hace
+        el CDM durante steady-state, pero nunca instrumentamos al
+        decoder, ni al componente PMP del lado kernel
+        (\texttt{peauth.sys}), ni la superficie protegida, ni
+        cualquier otro componente posicionado para materializar
+        un cuadro descifrado. El shim shape-only es el hook más
+        profundo en el stack que instalamos.
+  \item \textbf{Falsificación antes de la publicación.} Cada
+        afirmación empírica se somete a una prueba de
+        falsificación: una hipótesis alternativa que, si fuera
+        verdadera, invalidaría la afirmación, se construye y se
+        prueba con cualquier evidencia que la metodología pueda
+        producir. La Sección~\ref{sec:robustness} reporta el
+        sprint de falsificación.
 \end{enumerate}
 
-A natural-language consequence of these invariants is that our
-results characterise the CDM's \emph{dispatch behaviour}, not its
-\emph{cryptographic state}. We can report how often a slot fires
-during real playback, what register-tuple distribution it sees,
-what the shape of its incoming buffer descriptor is. We cannot
-and do not report any byte of decoded content.
+Una consecuencia en lenguaje natural de estas invariantes es que
+nuestros resultados caracterizan el \emph{comportamiento de
+despacho} del CDM, no su \emph{estado criptográfico}. Podemos
+reportar con qué frecuencia dispara una ranura durante reproducción
+real, qué distribución de tuplas de registros ve, cuál es la forma
+de su descriptor de buffer entrante. No podemos y no reportamos
+ningún byte de contenido decodificado.
 
 % =============================================================================
 \section{Ingeniería inversa estática de CDM\_11}
 \label{sec:static}
 
-This section walks through the static reverse engineering of the
-CDM\_11 dispatch in \texttt{widevinecdm.dll}, in the order that we
-performed it. Two binaries were analysed in parallel: \textbf{Chrome
-149.0.7827.115}, from its standard installation path
-under \texttt{WidevineCdm/\_platform\_specific/win\_x64/}
-($\sim$22~MB), and the same library as it ships in \textbf{Microsoft
-Edge 150} ($\sim$19~MB). All RVAs are with respect to the binary's
-image base.
+Esta sección recorre la ingeniería inversa estática del despacho
+CDM\_11 en \texttt{widevinecdm.dll}, en el orden en que la
+realizamos. Dos binarios fueron analizados en paralelo:
+\textbf{Chrome 149.0.7827.115}, desde su path de instalación
+estándar bajo \texttt{WidevineCdm/\_platform\_specific/win\_x64/}
+($\sim$22~MB), y la misma biblioteca tal como viene en
+\textbf{Microsoft Edge 150} ($\sim$19~MB). Todos los RVAs se
+miden respecto al image base del binario.
 
-\subsection{Paso 1: \texttt{CreateCdmInstance} y el switch de versión
-            switch}
+\subsection{Paso 1: \texttt{CreateCdmInstance} y el switch de versión}
 \label{sec:static-export}
 
-The \texttt{widevinecdm.dll} export table contains six entries; the
-only relevant one for our purposes is \texttt{CreateCdmInstance}:
+La tabla de exports de \texttt{widevinecdm.dll} contiene seis
+entradas; la única relevante para nuestros propósitos es
+\texttt{CreateCdmInstance}:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 Edge 150     CreateCdmInstance @ rva 0x1d0850
 Chrome 149   CreateCdmInstance @ rva 0x1d2e10
 \end{lstlisting}
 
-Disassembling either entry shows a chain of small wrapper functions
-that load a version word into \texttt{ecx} (CDM interface version 9,
-10, or 11) and call a per-version constructor. The disassembly of
-the relevant fragment of Edge 150's \texttt{CreateCdmInstance} is:
+Disassemblando cualquiera de las dos entradas muestra una cadena
+de pequeñas funciones wrapper que cargan una palabra de versión
+en \texttt{ecx} (versión 9, 10, u 11 de la interfaz CDM) y llaman
+a un constructor por-versión. El disassembly del fragmento
+relevante del \texttt{CreateCdmInstance} de Edge 150 es:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 0x1801d0850: push   r14
@@ -893,37 +954,38 @@ the relevant fragment of Edge 150's \texttt{CreateCdmInstance} is:
 ...
 \end{lstlisting}
 
-Naively scanning the first \texttt{call} after each \texttt{mov ecx,
-0xb} returns the runtime's stack-check probe (\texttt{\_\_chkstk\_ms}
-or equivalent), not the actual constructor. A robust discoverer
-must filter known runtime helpers. The released
-\texttt{cdm\_arch\_discover.py} script uses a structural heuristic:
-enumerate all call targets reachable from \texttt{CreateCdmInstance},
-filter out targets called more than twice (the constructor is called
-exactly once per version branch; runtime helpers are called many
-times), and validate each candidate by inspecting whether its body
-contains a sequence of the form:
+Escanear ingenuamente el primer \texttt{call} después de cada
+\texttt{mov ecx, 0xb} devuelve el stack-check probe del runtime
+(\texttt{\_\_chkstk\_ms} o equivalente), no el constructor real.
+Un discoverer robusto debe filtrar helpers conocidos del runtime.
+El script liberado \texttt{cdm\_arch\_discover.py} usa una
+heurística estructural: enumera todos los targets de call
+alcanzables desde \texttt{CreateCdmInstance}, filtra targets
+llamados más de dos veces (el constructor se llama exactamente
+una vez por branch de versión; los helpers de runtime se llaman
+muchas veces), y valida cada candidato inspeccionando si su
+cuerpo contiene una secuencia de la forma:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
   lea reg, [rip + N]      ; load a candidate vtable RVA
   mov qword ptr [r?], reg ; install at offset 0 of `this`
 \end{lstlisting}
 
-\noindent and whether the loaded RVA points into \texttt{.rdata} at
-a location whose first nineteen QWORDs are all valid code pointers
-into \texttt{.text}. The first such candidate is reported as the
-CDM constructor and the loaded RVA as its outer vtable. The
-discoverer locates the outer vtable RVA in Edge 150 at
-\texttt{0x780250} on this path; the Chrome 149 outer vtable at
-\texttt{0x768fa0}.
+\noindent y si el RVA cargado apunta dentro de \texttt{.rdata} a
+una ubicación cuyos primeros diecinueve QWORDs son todos punteros
+de código válidos dentro de \texttt{.text}. El primer candidato
+que cumpla se reporta como el constructor del CDM y el RVA
+cargado como su outer vtable. El discoverer localiza el RVA de
+outer vtable en Edge 150 en \texttt{0x780250} por este camino; el
+outer vtable de Chrome 149 en \texttt{0x768fa0}.
 
 \subsection{Paso 2: Versiones co-empaquetadas del CDM}
 \label{sec:static-versions}
 
-A subsequent \emph{exhaustive} scan of \texttt{.rdata} for
-nineteen-slot structures matching the CDM thunk pattern (described
-below) reveals \textbf{two} such structures per binary, spaced
-\texttt{0xc0} bytes apart:
+Un escaneo \emph{exhaustivo} posterior de \texttt{.rdata} en
+busca de estructuras de diecinueve ranuras que coincidan con el
+patrón thunk del CDM (descrito abajo) revela \textbf{dos} de esas
+estructuras por binario, espaciadas a \texttt{0xc0} bytes:
 
 \begin{center}\small
 \begin{tabular}{lcc}
@@ -936,9 +998,10 @@ Chrome 149  & \texttt{0x768ee0} & \texttt{0x768fa0} \\
 \end{tabular}
 \end{center}
 
-Within each binary, both vtables share their per-frame decrypt entry
-(slot 14 points to the same function in both A and B), but their
-\texttt{Initialize} entries differ:
+Dentro de cada binario, ambas vtables comparten su entrada de
+descifrado por-cuadro (la ranura 14 apunta a la misma función
+tanto en A como en B), pero sus entradas \texttt{Initialize}
+difieren:
 
 \begin{center}\small
 \begin{tabular}{lcc}
@@ -951,22 +1014,24 @@ Chrome 149  & 0x1e03c0 & 0x1e0420 \\
 \end{tabular}
 \end{center}
 
-This is consistent with the binary shipping both CDM\_10 and CDM\_11
-vtables in support of host browsers that have not yet upgraded to
-the newer interface, and matches the Chromium header history. In
-what follows we identify \emph{vtable B} as the CDM\_11 outer
-vtable, since runtime patches at \emph{vtable B}'s slot positions
-intercept the EME-host-facing dispatch
-(Section~\ref{sec:runtime}). The shared slot 14 implementation
-reflects the implementation choice to use one per-frame decrypt
-routine across both interface versions; the diverging slot 0
-reflects the version-specific \texttt{Initialize} signature.
+Esto es consistente con que el binario empaqueta tanto vtables
+CDM\_10 como CDM\_11 en soporte a navegadores anfitriones que aún
+no se han actualizado a la interfaz más reciente, y coincide con
+el historial del header de Chromium. En lo que sigue
+identificamos a la \emph{vtable B} como la outer vtable de
+CDM\_11, dado que parches en runtime en las posiciones de ranuras
+de \emph{vtable B} interceptan el despacho frente al anfitrión
+EME (Sección~\ref{sec:runtime}). La implementación compartida en
+la ranura 14 refleja la decisión de implementación de usar una
+rutina de descifrado por-cuadro a lo largo de ambas versiones de
+interfaz; la ranura 0 divergente refleja la firma
+\texttt{Initialize} específica de versión.
 
 \subsection{Paso 3: El patrón thunk de la vtable externa}
 \label{sec:static-thunk}
 
-The outer vtable contains nineteen entries. Most of them are
-\emph{thunks} of the form:
+La outer vtable contiene diecinueve entradas. La mayoría de ellas
+son \emph{thunks} de la forma:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 slot N thunk @ rva 0x1dad00 + (N-3)*0x20:
@@ -977,10 +1042,11 @@ slot N thunk @ rva 0x1dad00 + (N-3)*0x20:
   jmp rdx                             ; CFG-protected tail-call
 \end{lstlisting}
 
-Each thunk is twenty-eight bytes followed by \texttt{int3} padding,
-laid out in a uniform \texttt{0x20}-spaced sequence in \texttt{.text}
-for slots 3 through 17. The slot 14 thunk in Edge 150, disassembled
-in full:
+Cada thunk son veintiocho bytes seguidos de relleno
+\texttt{int3}, dispuestos en una secuencia uniforme con
+espaciado \texttt{0x20} dentro de \texttt{.text} para las ranuras
+3 a 17. El thunk de la ranura 14 en Edge 150, disassemblado por
+completo:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 0x1801dae60: mov    rcx, qword ptr [rcx + 8]
@@ -993,70 +1059,76 @@ in full:
 ... (int3 padding to 0x20 boundary)
 \end{lstlisting}
 
-We disassembled each thunk in both binaries and confirmed the
-slot-index check (the offset in \texttt{[rax + 8*N]} equals the slot
-number times eight) for fifteen of fifteen thunked slots in each
-binary. The byte-level confirmation is what licences our
-``slot~14 dormancy'' claim in Section~\ref{sec:findings-dormancy}:
-the runtime evidence
-($g\_callsBySlot[14] = 0$) is attributable to the
-correct method only because the slot index in the outer-vtable
-thunk dispatches to the correct inner method offset.
+Disassemblamos cada thunk en ambos binarios y confirmamos el
+chequeo de índice de ranura (el offset en \texttt{[rax + 8*N]}
+es igual al número de ranura multiplicado por ocho) para quince
+de quince ranuras thunkeadas en cada binario. La confirmación
+byte-a-byte es lo que licencia nuestra afirmación de
+``inactividad de la ranura~14'' en la
+Sección~\ref{sec:findings-dormancy}: la evidencia en runtime
+($g\_callsBySlot[14] = 0$) es atribuible al método correcto sólo
+porque el índice de ranura en el thunk de la outer-vtable
+despacha al offset interno correcto.
 
-Slots 0 (\texttt{Initialize}), 1 (\texttt{GetStatusForPolicy}), and
-18 (\texttt{OnStorageId}) are \emph{not} thunks; they are direct
-implementations placed in \texttt{.text} at non-contiguous
-addresses. Slot 2 (\texttt{SetServerCertificate}) is a thunk in both
-binaries but dispatches via \texttt{[rax + 8]} rather than
-\texttt{[rax + 0x10]} --- it shares an implementation with slot 1 at
-the \texttt{m\_impl} layer. This is a per-binary architectural
-detail consistent in both Edge 150 and Chrome 149, suggesting it
-is a deliberate implementation decision rather than a build
-accident.
+Las ranuras 0 (\texttt{Initialize}), 1 (\texttt{GetStatusForPolicy})
+y 18 (\texttt{OnStorageId}) \emph{no} son thunks; son
+implementaciones directas ubicadas en \texttt{.text} en
+direcciones no contiguas. La ranura 2
+(\texttt{SetServerCertificate}) es un thunk en ambos binarios
+pero despacha vía \texttt{[rax + 8]} en lugar de
+\texttt{[rax + 0x10]} --- comparte una implementación con la
+ranura 1 a nivel de la capa \texttt{m\_impl}. Este es un detalle
+arquitectural por-binario consistente tanto en Edge 150 como en
+Chrome 149, sugiriendo que es una decisión deliberada de
+implementación más que un accidente del build.
 
 \subsection{Paso 4: La vtable \texttt{m\_impl}}
 \label{sec:static-mimpl}
 
-The outer thunk dispatches into an \emph{intermediate} vtable owned
-by the \texttt{m\_impl} object that the outer class holds in
-\texttt{this->m\_impl} (\texttt{[outer + 8]}). Locating this
-intermediate vtable in \texttt{.rdata} is the second step of the
-static analysis.
+El thunk externo despacha hacia una vtable \emph{intermedia}
+poseída por el objeto \texttt{m\_impl} que la clase exterior
+mantiene en \texttt{this->m\_impl} (\texttt{[outer + 8]}).
+Localizar esta vtable intermedia en \texttt{.rdata} es el segundo
+paso del análisis estático.
 
-We use a known-signature pivot. From an earlier call-chain trace
-(documented in our research notes), we knew that the slot-5
-(\texttt{UpdateSession}) inner wrapper in Edge 150 sits at RVA
-\texttt{0x1d4ab0}, identifiable by its multi-push prologue with a
-stack canary that loads attacker-controlled data through a copy on
-its way to the obfuscated parser. The wrapper's code is unmistakable
-in a disassembly listing.
+Usamos un pivote de firma conocida. De una traza de call-chain
+previa (documentada en nuestras notas de investigación), sabíamos
+que el wrapper interno de la ranura 5 (\texttt{UpdateSession}) en
+Edge 150 está en RVA \texttt{0x1d4ab0}, identificable por su
+prólogo multi-push con un stack canary que carga datos
+atacante-controlables a través de una copia camino al parser
+ofuscado. El código del wrapper es inconfundible en un listing de
+disassembly.
 
-To find the \texttt{m\_impl} vtable, we reverse-search \texttt{.rdata}
-for the QWORD value \texttt{image\_base + 0x1d4ab0}. There is
-exactly one occurrence. Backing up five eight-byte entries from the
-match gives the address of the \texttt{m\_impl} vtable: RVA
-\texttt{0x77d370} in Edge 150. All nineteen surrounding QWORDs
-point into \texttt{.text}, confirming the candidate. The same pivot
-applied to Chrome 149 (where the slot 5 inner wrapper sits at the
-analogous RVA) locates Chrome 149's \texttt{m\_impl} vtable at the
-corresponding offset.
+Para encontrar la vtable \texttt{m\_impl}, hacemos una búsqueda
+reversa en \texttt{.rdata} del valor QWORD
+\texttt{image\_base + 0x1d4ab0}. Hay
+exactamente una ocurrencia. Retroceder cinco entradas de ocho
+bytes desde el match da la dirección de la vtable
+\texttt{m\_impl}: RVA \texttt{0x77d370} en Edge 150. Los
+diecinueve QWORDs circundantes apuntan dentro de \texttt{.text},
+confirmando al candidato. El mismo pivote aplicado a Chrome 149
+(donde el wrapper interno de la ranura 5 está en el RVA análogo)
+localiza la vtable \texttt{m\_impl} de Chrome 149 en el offset
+correspondiente.
 
 \subsection{Paso 5: La estructura de la capa \texttt{m\_impl}}
 \label{sec:static-layer2}
 
-Disassembling each entry of the \texttt{m\_impl} vtable reveals a
-mixture of three body types:
+Disassemblando cada entrada de la vtable \texttt{m\_impl} se
+revela una mezcla de tres tipos de cuerpo:
 
 \begin{enumerate}[itemsep=2pt,topsep=2pt]
-  \item \textbf{Clean MSVC wrappers} (slots 2, 3, 4, 5, 6, 7, 18).
-        These have a standard prologue (multiple
-        \texttt{push}~callee-saves, \texttt{sub rsp, N}, stack
-        canary load), allocate or borrow input copies, perform
-        sanitisation, and then call into a deeper handler. These
-        are the slots that ingest variable-length
-        attacker-influenced data (session-id strings, response
-        payloads, init-data buffers). The slot 3 wrapper in Edge
-        150, abbreviated for the paper:
+  \item \textbf{Wrappers MSVC limpios} (ranuras 2, 3, 4, 5, 6, 7,
+        18). Tienen un prólogo estándar (múltiples
+        \texttt{push}~callee-saves, \texttt{sub rsp, N}, carga del
+        stack canary), allocan o piden prestadas copias de input,
+        realizan saneamiento, y luego llaman a un handler más
+        profundo. Estas son las ranuras que ingieren datos de
+        longitud variable influenciados por el atacante (strings
+        de session-id, payloads de respuesta, buffers de
+        init-data). El wrapper de la ranura 3 en Edge 150,
+        abreviado para el paper:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 0x1801d47d0: push   r15
@@ -1087,37 +1159,39 @@ mixture of three body types:
                                         ; (obfuscated parser)
 \end{lstlisting}
 
-  \item \textbf{Double-trampolines} (slots 0, 1, 8, 9, 11--17).
-        Two-instruction bodies of the form
-        \texttt{mov rcx, [rcx + N]} followed by \texttt{jmp <addr>}
-        which forward the call to a deeper-layer handler without
-        intermediate processing. The slot 14 \texttt{m\_impl}
-        entry in Edge 150:
+  \item \textbf{Double-trampolines} (ranuras 0, 1, 8, 9, 11--17).
+        Cuerpos de dos instrucciones de la forma
+        \texttt{mov rcx, [rcx + N]} seguido por \texttt{jmp <addr>}
+        que reenvían la llamada a un handler de capa más profunda
+        sin procesamiento intermedio. La entrada de la ranura 14
+        de \texttt{m\_impl} en Edge 150:
 
 \begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
 0x1801d4f10: mov    rcx, qword ptr [rcx + 0x10]
 0x1801d4f14: jmp    0x180230c20    ; layer-3 handler (obfuscated)
 \end{lstlisting}
 
-  \item \textbf{Stubs} (slot 10). A two-instruction body
-        \texttt{mov eax, 3 ; ret} that returns a constant error
-        code without any further work. Slot 10 is
-        \texttt{InitializeAudioDecoder}; on the L1 Windows build it
-        is intentionally a no-op because audio decoding is handled
-        by the Media Foundation pipeline outside the CDM.
+  \item \textbf{Stubs} (ranura 10). Un cuerpo de dos instrucciones
+        \texttt{mov eax, 3 ; ret} que devuelve un código de error
+        constante sin más trabajo. La ranura 10 es
+        \texttt{InitializeAudioDecoder}; en el build L1 de Windows
+        es intencionalmente un no-op porque la decodificación de
+        audio es manejada por el pipeline Media Foundation fuera
+        del CDM.
 \end{enumerate}
 
-\noindent The \texttt{m\_impl} vtable, in other words, is mostly a
-\emph{routing} layer; the actual work happens one indirection
-further.
+\noindent La vtable \texttt{m\_impl}, en otras palabras, es
+mayormente una capa de \emph{ruteo}; el trabajo real sucede una
+indirección más adelante.
 
 \subsection{Paso 6: El modelo de despacho de tres capas}
 \label{sec:static-3layer}
 
-Composing the previous five steps, the dispatch chain from a host
-virtual call to a per-slot handler is shown in
-Figure~\ref{fig:3layer}. Each public virtual call traverses three
-indirections before reaching the function that performs work.
+Componiendo los cinco pasos anteriores, la cadena de despacho
+desde una llamada virtual del anfitrión hasta un handler
+por-ranura se muestra en la Figura~\ref{fig:3layer}. Cada llamada
+virtual pública atraviesa tres indirecciones antes de alcanzar la
+función que realiza el trabajo.
 
 \begin{figure}[t]
 \centering
@@ -1141,91 +1215,98 @@ indirections before reaching the function that performs work.
   \draw[fatarrow] (l2.south) -- node[right,font=\scriptsize,xshift=2pt] {trampoline target / wrapper call} (l3.north);
 \end{tikzpicture}%
 }%
-\caption{The three-layer CDM\_11 dispatch model. Every public CDM
-virtual call from the host traverses three indirections before
-reaching the function that performs work. RVAs shown are from
-Edge 150 \texttt{widevinecdm.dll}; Chrome 149 has the same
-structure at correspondingly different RVAs (see
-Section~\ref{sec:cross}).}
+\caption{El modelo de despacho de tres capas de CDM\_11. Cada
+llamada virtual pública del CDM desde el anfitrión atraviesa tres
+indirecciones antes de alcanzar la función que realiza el
+trabajo. Los RVAs mostrados son de Edge 150
+\texttt{widevinecdm.dll}; Chrome 149 tiene la misma estructura en
+RVAs correspondientemente diferentes (ver
+Sección~\ref{sec:cross}).}
 \label{fig:3layer}
 \end{figure}
 
 \subsection{Una nota sobre los falsos arranques}
 \label{sec:static-false}
 
-For the benefit of follow-on researchers, the static analysis as we
-actually performed it included two substantial false starts.
+Para el beneficio de investigadores que sigan este trabajo, el
+análisis estático tal como en realidad lo llevamos a cabo
+incluyó dos falsos arranques substanciales.
 
-The first false start was the identification of an internal
-singleton dispatch table at \texttt{.data + 0x1588b48} as the
-``CDM\_11 outer vtable.'' That table, in fact, is a separate
-nineteen-slot internal dispatch surface inside the Widevine library
-that is not the public EME interface. Our initial conclusion that
-``the CDM\_11 outer vtable's per-frame slot fires
-$\sim$600 times per second under steady-state Netflix HW playback''
-was incorrect: it was the internal singleton's slot 0 that fired
-600 times per second, and the actual outer-vtable per-frame slot
-was at zero. The correction came from a constructor-trace pivot
-that located the actual outer vtable via the
-\texttt{CreateCdmInstance} export, after which the dormancy finding
-became correctly attributable to the user-facing surface.
+El primer falso arranque fue identificar una tabla de despacho
+singleton interna en \texttt{.data + 0x1588b48} como la
+``outer vtable de CDM\_11''. Esa tabla, de hecho, es una
+superficie de despacho interna separada de diecinueve ranuras
+dentro de la biblioteca Widevine que no es la interfaz pública
+EME. Nuestra conclusión inicial de que ``la ranura por-cuadro de
+la outer vtable de CDM\_11 dispara $\sim$600 veces por segundo
+bajo reproducción HW de Netflix en steady-state''
+era incorrecta: era la ranura 0 del singleton interno la que
+disparaba 600 veces por segundo, y la ranura por-cuadro real de
+la outer-vtable estaba en cero. La corrección vino de un pivote
+de traza de constructor que localizó la outer vtable real vía el
+export \texttt{CreateCdmInstance}, tras lo cual el hallazgo de
+inactividad pasó a ser correctamente atribuible a la superficie
+de cara al usuario.
 
-The second false start was the original attribution of MBA-style
-obfuscation to the \texttt{m\_impl} layer. The \texttt{m\_impl}
-layer is in fact a clean routing layer (per
-Section~\ref{sec:static-layer2}); the obfuscation lives at layer
-three. A layer-by-layer enumeration of all nineteen slots,
-documented in our research notes 13b and 13c, located the
-obfuscation at its actual depth.
+El segundo falso arranque fue la atribución original de
+ofuscación estilo MBA a la capa \texttt{m\_impl}. La capa
+\texttt{m\_impl} de hecho es una capa de ruteo limpia (según la
+Sección~\ref{sec:static-layer2}); la ofuscación vive en la capa
+tres. Una enumeración capa-por-capa de las diecinueve ranuras,
+documentada en nuestras notas de investigación 13b y 13c,
+localizó la ofuscación en su profundidad real.
 
-We highlight these false starts because they are typical of static
-RE work on closed binaries with internal dispatch indirections.
-A single-pass reading of the binary's call graph would naturally
-have settled on either the wrong vtable or the wrong layer, and
-the falsification sprint of Section~\ref{sec:robustness} is what
-caught both.
+Destacamos estos falsos arranques porque son típicos del trabajo
+de RE estático sobre binarios cerrados con indirecciones
+internas de despacho. Una lectura en una sola pasada del call
+graph del binario naturalmente se habría asentado o en la vtable
+incorrecta o en la capa incorrecta, y el sprint de falsificación
+de la Sección~\ref{sec:robustness} es lo que atrapó ambos.
 
 % =============================================================================
 \section{Instrumentación en runtime}
 \label{sec:runtime}
 
-The static map of the previous section yields hypotheses about which
-slots are reached during steady-state playback and which are not.
-To verify those hypotheses we instrument the running CDM utility
-process with a shape-only hook.
+El mapa estático de la sección anterior arroja hipótesis sobre
+qué ranuras son alcanzadas durante reproducción en steady-state y
+cuáles no. Para verificar esas hipótesis instrumentamos el
+proceso utility del CDM en ejecución con un hook shape-only.
 
 \subsection{Code Integrity Guard (CIG) y el flag de launch}
 \label{sec:runtime-cig}
 
-Chrome enables Code Integrity Guard
+Chrome habilita Code Integrity Guard
 (\texttt{PROCESS\_CREATION\_MITIGATION\_POLICY\_BLOCK\_NON\_\\MICROSOFT\_BINARIES\_ALWAYS\_ON})
-on its utility processes since Chrome 70~\cite{chromium-cig}. CIG
-denies any \texttt{LoadLibrary} of a non-Microsoft-signed image at
-the kernel level, so a vanilla \texttt{CreateRemoteThread(LoadLibraryA)}
-injection of our shim fails at the \texttt{LdrLoadDll} stage with
+en sus procesos utility desde Chrome 70~\cite{chromium-cig}. CIG
+rechaza cualquier \texttt{LoadLibrary} de una imagen no firmada
+por Microsoft a nivel del kernel, por lo que una inyección
+vainilla \texttt{CreateRemoteThread(LoadLibraryA)} de nuestro
+shim falla en la etapa \texttt{LdrLoadDll} con
 \texttt{STATUS\_DYNAMIC\_CODE\_BLOCKED} (0xC0000605).
 
-For lab-research use, Chrome can be launched with the flags
+Para uso de investigación en laboratorio, Chrome puede ser
+lanzado con las flags
 \texttt{--disable-features=}\linebreak[1]\texttt{RendererCodeIntegrity}
-and \texttt{--no-sandbox}, which together disable CIG on the
-utility processes.
-This produces a controlled research target without changing the
-CDM library or the host browser binary, and corresponds to the
-equivalent reachability assumption that an attacker with
-code-execution in the renderer would have to satisfy separately
-(via, for example, an arbitrary-write that targets the renderer's
-JIT or a process-load chain that bypasses CIG).
+y \texttt{--no-sandbox}, que en conjunto deshabilitan CIG en los
+procesos utility. Esto produce un target de investigación
+controlado sin modificar la biblioteca CDM ni el binario del
+navegador anfitrión, y corresponde a la asunción equivalente de
+alcanzabilidad que un atacante con ejecución de código en el
+renderer tendría que satisfacer por separado (vía, por ejemplo,
+una arbitrary-write al JIT del renderer o una cadena de
+process-load que evada CIG).
 
 \subsection{Registro del bitmap de Control Flow Guard}
 \label{sec:runtime-cfg}
 
-CIG-disabled does not disable Control Flow Guard (CFG): once the
-shim is loaded, simply patching a vtable entry to point at an
-unregistered hook function causes the CFG dispatcher to abort the
-call as a control-flow violation. The released installer uses
-\texttt{SetProcessValidCallTargets} to mark each hook target as a
-valid call target before patching its slot. Figure~\ref{fig:hookinstall}
-sketches the install flow.
+CIG-deshabilitado no deshabilita Control Flow Guard (CFG): una
+vez que el shim está cargado, simplemente parchar una entrada de
+vtable para que apunte a una función hook no registrada causa
+que el dispatcher CFG aborte la llamada como una violación de
+control de flujo. El installer liberado usa
+\texttt{SetProcessValidCallTargets} para marcar cada hook target
+como un call target válido antes de parchar su ranura. La
+Figura~\ref{fig:hookinstall} bosqueja el flujo de instalación.
 
 \begin{figure}[t]
 \centering
@@ -1240,23 +1321,25 @@ sketches the install flow.
   \foreach \a/\b in {s1/s2, s2/s3, s3/s4, s4/s5, s5/s6, s6/s7}
     \draw[fatarrow] (\a) -- (\b);
 \end{tikzpicture}
-\caption{Hook installation sequence. Step~5 (CFG bitmap registration)
-is what catches researchers most often --- the \texttt{Offset} field of
-\texttt{CFG\_CALL\_TARGET\_INFO} expects an in-page offset (low 12
-bits) of the hook target, not an absolute address or a different
-mask. Step~4 captures the design subtlety that motivated the
-per-slot back-pointer array (\S\ref{sec:runtime-orig}).}
+\caption{Secuencia de instalación del hook. El Paso~5 (registro
+del bitmap CFG) es lo que atrapa a los investigadores con más
+frecuencia --- el campo \texttt{Offset} de
+\texttt{CFG\_CALL\_TARGET\_INFO} espera un offset intra-página
+(12 bits bajos) del hook target, no una dirección absoluta ni
+otra máscara. El Paso~4 captura la sutileza de diseño que
+motivó al array de back-pointers por-ranura
+(\S\ref{sec:runtime-orig}).}
 \label{fig:hookinstall}
 \end{figure}
 
 \subsection{Diseño del shim shape-only}
 \label{sec:runtime-shape}
 
-The shim, \texttt{wv\_shim.dll}, exports nineteen per-slot hook
-functions \texttt{WvHookSlot0} through \texttt{WvHookSlot18}, each
-with its own original-pointer slot in an exported
-\texttt{g\_pOrigSlot[19]} array, and a single
-\texttt{g\_callsBySlot[19]} counter array. Each hook function:
+El shim, \texttt{wv\_shim.dll}, exporta diecinueve funciones hook
+por-ranura \texttt{WvHookSlot0} hasta \texttt{WvHookSlot18}, cada
+una con su propio slot de puntero original en un array exportado
+\texttt{g\_pOrigSlot[19]}, y un único array contador
+\texttt{g\_callsBySlot[19]}. Cada función hook:
 
 \begin{enumerate}[itemsep=2pt,topsep=2pt]
   \item Atomically increments its slot counter and the aggregate
@@ -1284,31 +1367,35 @@ into a hash and then immediately discarded. The shim source enforces
 this by simply not having a code path that copies any of those
 fields into a logging structure.
 
-The safe-copy primitive uses \texttt{VirtualQuery} to confirm that
-each source page is committed and readable before copying, since
-\texttt{mingw-w64}'s C compiler does not provide Microsoft
-SEH \texttt{\_\_try / \_\_except} on x86\_64. The check walks every
-page in the source range, confirms \texttt{MEM\_COMMIT} state, and
-confirms one of the read-permitted page protections
-(\texttt{PAGE\_READONLY}, \texttt{PAGE\_READWRITE},
-\texttt{PAGE\_EXECUTE\_READ}, etc.) before \texttt{memcpy}.
+El primitivo safe-copy usa \texttt{VirtualQuery} para confirmar
+que cada página fuente está commit'eada y es legible antes de
+copiar, ya que el compilador C de \texttt{mingw-w64} no provee
+el SEH \texttt{\_\_try / \_\_except} de Microsoft en x86\_64. El
+check recorre cada página del rango fuente, confirma el estado
+\texttt{MEM\_COMMIT}, y confirma una de las protecciones de
+página con permiso de lectura (\texttt{PAGE\_READONLY},
+\texttt{PAGE\_READWRITE}, \texttt{PAGE\_EXECUTE\_READ}, etc.)
+antes del \texttt{memcpy}.
 
 \subsection{Cadena de punteros originales por ranura}
 \label{sec:runtime-orig}
 
-A design subtlety worth noting: the first version of the shim used
-a single \texttt{g\_pOrigDecrypt} variable for all hooked slots.
-Patching multiple slots with that single back-pointer led to
-signature-mismatch crashes the moment the second-patched slot fired
-(the back-pointer held the previous slot's original). The released
-shim uses a per-slot array. More subtly still, when we hook the
-\emph{outer} vtable rather than an internal singleton table, the
-back-pointer must hold the outer thunk address, \emph{not} an
-internal dispatch-table address; otherwise the original-call path
-ends up jumping into the wrong inner function and silently corrupts
-the call. Our installer (\texttt{wv\_helper3.c}) reads the
-outer-vtable original at the moment of patch and stores it into
-\texttt{g\_pOrigSlot[N]} as part of the same atomic operation:
+Una sutileza de diseño que vale la pena notar: la primera versión
+del shim usaba una sola variable \texttt{g\_pOrigDecrypt} para
+todas las ranuras hookeadas. Parchar múltiples ranuras con ese
+único back-pointer llevaba a crashes por signature-mismatch en el
+momento que disparaba la segunda ranura parcheada (el back-pointer
+contenía el original de la ranura anterior). El shim liberado usa
+un array por-ranura. Aún más sutilmente, cuando hookeamos la
+vtable \emph{exterior} en lugar de una tabla singleton interna,
+el back-pointer debe contener la dirección del thunk exterior,
+\emph{no} una dirección de tabla de despacho interna; si no, el
+camino de llamada-original termina saltando a la función interna
+incorrecta y corrompe silenciosamente la llamada. Nuestro
+installer (\texttt{wv\_helper3.c}) lee el original de la outer
+vtable en el momento del parche y lo guarda en
+\texttt{g\_pOrigSlot[N]} como parte de la misma operación
+atómica:
 
 \begin{lstlisting}[language=C, basicstyle=\ttfamily\scriptsize]
 DWORD_PTR origFn = 0;
@@ -1337,43 +1424,49 @@ VirtualProtectEx(hp, (LPVOID)slotAddr, 8, oldProt, &oldProt);
 \section{Hallazgos empíricos}
 \label{sec:findings}
 
-We report four findings, each anchored to a recorded experimental
-run. All runs used Chrome 149.0.7827.115 on Windows 11 26100 with
-NVIDIA hardware-secure decoder available. No CDM utility process
-ever crashed during the runs that produced the data reported here.
+Reportamos cuatro hallazgos, cada uno anclado a una corrida
+experimental grabada. Todas las corridas usaron Chrome
+149.0.7827.115 en Windows 11 26100 con decoder NVIDIA
+hardware-secure disponible. Ningún proceso utility del CDM
+crasheó durante las corridas que produjeron los datos reportados
+aquí.
 
 \subsection{Inactividad bajo decode por hardware en la superficie pública}
 \label{sec:findings-dormancy}
 
-\textbf{Hipótesis.} Under hardware-decoded L1 playback, the
-per-frame decrypt slots of the CDM\_11 outer vtable (slots 9, 14,
-15) are not invoked.
+\textbf{Hipótesis.} Bajo reproducción L1 con decode por hardware,
+las ranuras de descifrado por-cuadro de la outer vtable de
+CDM\_11 (ranuras 9, 14, 15) no son invocadas.
 
-\textbf{Procedimiento.} Chrome was launched with
-\texttt{--disable-features=RendererCodeIntegrity --no-sandbox}. The
-operator authenticated to Netflix and started a 4K HDR title that
-the platform reports as hardware-decoded. After ninety seconds of
-steady-state playback we installed our shim into the CDM utility
-process and patched four outer-vtable slots simultaneously: slot 14
-(\texttt{DecryptAndDecodeFrame}), slot 15
-(\texttt{DecryptAndDecodeSamples}), slot 3
-(\texttt{CreateSessionAndGenerateRequest}, control), and the
-slot-14 outer thunk RVA. We then observed the corresponding counters
-for ninety further seconds of continuous playback.
+\textbf{Procedimiento.} Chrome fue lanzado con
+\texttt{--disable-features=RendererCodeIntegrity --no-sandbox}.
+El operador se autenticó en Netflix y comenzó un título 4K HDR
+que la plataforma reporta como decoded por hardware. Después de
+noventa segundos de reproducción en steady-state instalamos
+nuestro shim en el proceso utility del CDM y parchamos cuatro
+ranuras de la outer-vtable simultáneamente: la ranura 14
+(\texttt{DecryptAndDecodeFrame}), la 15
+(\texttt{DecryptAndDecodeSamples}), la 3
+(\texttt{CreateSessionAndGenerateRequest}, control), y el RVA
+del thunk exterior de la ranura 14. Luego observamos los
+contadores correspondientes por noventa segundos más de
+reproducción continua.
 
-\textbf{Resultado.} All four counters remained at zero. Video continued
-to play normally throughout. Slot-14 dormancy held even across
-recoveries (we restored slot 14 to its original mid-experiment and
+\textbf{Resultado.} Los cuatro contadores se mantuvieron en
+cero. El video continuó reproduciéndose normalmente todo el
+tiempo. La inactividad de la ranura 14 se mantuvo incluso a
+través de recuperaciones (restauramos la ranura 14 a su original
+a mitad del experimento y
 re-patched; the counter remained at zero across both windows). The
 four-slot zero-fires-in-ninety-seconds result was reproducible
 3/3.
 
-\textbf{Interpretación.} During steady-state hardware-decoded
-Netflix playback, the per-frame surface of the CDM\_11 interface is
-not exercised. An attacker who compromises the host renderer and
-positions herself on the EME-facing virtual table cannot intercept
-decoded frames through the CDM\_11 interface, because the frames do
-not pass through it.
+\textbf{Interpretación.} Durante reproducción Netflix
+hardware-decoded en steady-state, la superficie por-cuadro de la
+interfaz CDM\_11 no se ejerce. Un atacante que comprometa el
+renderer anfitrión y se posicione sobre la vtable virtual de cara
+a EME no puede interceptar cuadros decodificados a través de la
+interfaz CDM\_11, porque los cuadros no pasan por ella.
 
 \begin{figure}[t]
 \centering
@@ -1398,28 +1491,32 @@ not pass through it.
     node[midway, right, font=\scriptsize, text=red, align=left] {per-frame\\bypass};
 \end{tikzpicture}%
 }%
-\caption{Hardware-decode dormancy. Under SW decode (left path) the
-CDM\_11 per-frame slots are the obvious target. Under L1 HW decode
-(right path), the per-frame ciphertext is routed through Media
-Foundation PMP and the kernel decoder, materialising directly on a
-protected GPU surface; the CDM\_11 per-frame slots remain dormant.}
+\caption{Inactividad bajo decode por hardware. Bajo decode SW
+(camino izquierdo), las ranuras por-cuadro de CDM\_11 son el
+target obvio. Bajo decode HW L1 (camino derecho), el ciphertext
+por-cuadro es ruteado a través de Media Foundation PMP y el
+decoder de kernel, materializándose directamente sobre una
+superficie GPU protegida; las ranuras por-cuadro de CDM\_11
+permanecen dormidas.}
 \label{fig:hwdormancy}
 \end{figure}
 
 \subsection{Actividad del singleton interno a $\sim$2.3k ops/s}
 \label{sec:findings-singleton}
 
-\textbf{Hipótesis.} Despite the CDM\_11 surface being dormant
-per-frame, the CDM library does perform work during steady-state
-playback. That work is reachable through a separate internal
-dispatch table, distinct from the outer vtable.
+\textbf{Hipótesis.} A pesar de que la superficie CDM\_11 esté
+dormida por-cuadro, la biblioteca CDM sí realiza trabajo durante
+reproducción en steady-state. Ese trabajo es alcanzable a través
+de una tabla de despacho interna separada, distinta de la outer
+vtable.
 
-\textbf{Procedimiento.} We patched slots 0--7 of the internal singleton
-table identified at \texttt{.data + 0x1588b48} in Chrome 149, then
-observed for $\sim$355 seconds of continuous Netflix playback.
+\textbf{Procedimiento.} Parchamos las ranuras 0--7 de la tabla
+singleton interna identificada en \texttt{.data + 0x1588b48} en
+Chrome 149, luego observamos durante $\sim$355 segundos de
+reproducción Netflix continua.
 
-\textbf{Resultado.} The shim recorded \textbf{810{,}099 events} in a
-single JSONL log (in two consecutive captures). Distribution:
+\textbf{Resultado.} El shim grabó \textbf{810{,}099 eventos} en un
+único log JSONL (en dos capturas consecutivas). Distribución:
 
 \begin{center}\small
 \begin{tabular}{rrrr}
@@ -1433,8 +1530,8 @@ single JSONL log (in two consecutive captures). Distribution:
 \end{tabular}
 \end{center}
 
-\noindent The aggregate rate is $\sim$2{,}281 events/sec on this
-internal table during steady-state HW playback.
+\noindent La tasa agregada es $\sim$2{,}281 eventos/seg en esta
+tabla interna durante reproducción HW en steady-state.
 
 \begin{figure}[h]
 \centering
@@ -1461,39 +1558,43 @@ internal table during steady-state HW playback.
 \addplot[fill=red!30] coordinates {(0,1114) (1,0) (2,0.06) (3,0) (4,0) (5,0) (6,1167) (7,0)};
 \end{axis}
 \end{tikzpicture}
-\caption{Activity profile of the internal singleton dispatch table at
-\texttt{.data + 0x1588b48} during steady-state Netflix 4K HDR
-playback.}
+\caption{Perfil de actividad de la tabla de despacho singleton
+interna en \texttt{.data + 0x1588b48} durante reproducción
+Netflix 4K HDR en steady-state.}
 \label{fig:singleton-rate}
 \end{figure}
 
-\textbf{Interpretación.} The internal singleton dispatch is
-\emph{not} the user-facing CDM\_11 interface; the slot 0 firing rate
-is incompatible with \texttt{Initialize} semantics (which would be
-called once per session, not 600 times per second). Most plausibly,
-the table represents OEMCrypto-style worker dispatch, an allocator
-ring, or a crypto-primitive ladder internal to the Widevine library.
-Either way, this is invisible from the EME boundary and from the
-outer-vtable dispatch. Combined with the dormancy finding above,
-the picture is: \emph{the CDM library is doing constant
-cryptographic work during HW playback, but that work is hidden
-behind a different dispatch surface than the one Chrome's EME
-plumbing knows about}.
+\textbf{Interpretación.} El despacho singleton interno
+\emph{no} es la interfaz CDM\_11 de cara al usuario; la tasa de
+disparo de la ranura 0 es incompatible con la semántica de
+\texttt{Initialize} (que sería llamada una sola vez por sesión,
+no 600 veces por segundo). Lo más plausible es que la tabla
+represente despacho estilo worker OEMCrypto, un anillo de
+allocator, o una escalera de primitivas criptográficas interna
+a la biblioteca Widevine. De todas formas, esto es invisible
+desde el límite EME y desde el despacho de la outer-vtable.
+Combinado con el hallazgo de inactividad anterior, el cuadro es:
+\emph{la biblioteca CDM está haciendo trabajo criptográfico
+constante durante reproducción HW, pero ese trabajo está
+escondido detrás de una superficie de despacho diferente a la que
+conoce el cableado EME de Chrome}.
 
 \subsection{Alcanzabilidad de las ranuras de gestión de sesión}
 \label{sec:findings-session}
 
-\textbf{Hipótesis.} Although the per-frame outer-vtable slots are
-dormant under HW decode, the session-management outer-vtable slots
-(\texttt{CreateSessionAndGenerateRequest} and
-\texttt{UpdateSession}) remain reachable and \emph{do} fire during
-normal session lifecycle events.
+\textbf{Hipótesis.} A pesar de que las ranuras por-cuadro de la
+outer-vtable estén dormidas bajo decode HW, las ranuras de
+gestión-de-sesión de la outer-vtable
+(\texttt{CreateSessionAndGenerateRequest} y
+\texttt{UpdateSession}) siguen siendo alcanzables y \emph{sí}
+disparan durante eventos normales de ciclo de vida de sesión.
 
-\textbf{Procedimiento.} We patched outer-vtable slots 3 and 5 with
-correct per-slot back-pointers to their original thunk addresses
-(Section~\ref{sec:runtime-orig}). The operator performed a title
-switch in the running Netflix tab and we observed the
-\texttt{g\_callsBySlot} counters over the following minute.
+\textbf{Procedimiento.} Parchamos las ranuras 3 y 5 de la
+outer-vtable con back-pointers por-ranura correctos a sus
+direcciones originales de thunk
+(Sección~\ref{sec:runtime-orig}). El operador realizó un cambio
+de título en la pestaña Netflix en ejecución y observamos los
+contadores \texttt{g\_callsBySlot} durante el minuto siguiente.
 
 \textbf{Resultado.}
 
@@ -1508,34 +1609,36 @@ post-action & \textbf{13 (+3)} & \textbf{12 (+3)} \\
 \end{tabular}
 \end{center}
 
-\noindent Three CreateSessionAndGenerateRequest invocations and three
-UpdateSession invocations were observed in the seconds following the
-title switch. The CDM utility process remained alive
-($\sim$85~MB working set), as expected given that the back-pointer
-held the correct thunk address.
+\noindent Tres invocaciones de CreateSessionAndGenerateRequest y
+tres de UpdateSession fueron observadas en los segundos siguientes
+al cambio de título. El proceso utility del CDM se mantuvo vivo
+($\sim$85~MB working set), como se esperaba dado que el
+back-pointer contenía la dirección correcta del thunk.
 
-\textbf{Interpretación.} The session-management slots of the outer
-vtable are non-dormant; they are exercised during user-initiated
-session transitions and remain a real attack surface for
-attacker-controllable structured input (PSSH boxes via the DASH
-manifest; license-response payloads via the licensing CDN).
+\textbf{Interpretación.} Las ranuras de gestión-de-sesión de la
+outer vtable no están dormidas; se ejercen durante transiciones
+de sesión iniciadas por el usuario y se mantienen como una
+superficie de ataque real para input estructurado
+atacante-controlable (cajas PSSH vía el manifest DASH; payloads
+de respuesta-de-licencia vía el CDN de licencias).
 
 \subsection{Consistencia entre fuentes (Bitmovin)}
 \label{sec:findings-cross}
 
-\textbf{Hipótesis.} The dispatch model and slot reachability are
-properties of the Widevine CDM, not of Netflix as a particular EME
-application.
+\textbf{Hipótesis.} El modelo de despacho y la alcanzabilidad de
+ranuras son propiedades del CDM Widevine, no de Netflix como una
+aplicación EME particular.
 
-\textbf{Procedimiento.} After the Netflix title switch above, the
-operator opened a separate tab in the same Chrome browser and loaded
-the public Bitmovin Widevine demo at
-\texttt{bitmovin.com/demos/drm}. Chrome spawned a \emph{second} CDM
-utility process to service that tab. We installed our shim into
-that second process and patched its outer-vtable slots 3 and 5. The
-operator reloaded the demo to force session re-creation.
+\textbf{Procedimiento.} Después del cambio de título de Netflix
+anterior, el operador abrió una pestaña separada en el mismo
+navegador Chrome y cargó el demo público Widevine de Bitmovin en
+\texttt{bitmovin.com/demos/drm}. Chrome spawnó un \emph{segundo}
+proceso utility CDM para servir esa pestaña. Instalamos nuestro
+shim en ese segundo proceso y parchamos las ranuras 3 y 5 de su
+outer-vtable. El operador recargó el demo para forzar la
+re-creación de sesión.
 
-\textbf{Resultado.} Second CDM utility process counters:
+\textbf{Resultado.} Contadores del segundo proceso utility CDM:
 
 \begin{center}\small
 \begin{tabular}{lcc}
@@ -1570,56 +1673,63 @@ post-reload & \textbf{2} & \textbf{2} \\
   \draw[thinarrow] (h2) -- (r2);
 \end{tikzpicture}%
 }%
-\caption{Cross-source experiment. Two tabs of the same Chrome
-browser play two distinct Widevine-protected sources, each one
-served by its own CDM utility process. Identical hooks confirm
-identical session-management slot reachability.}
+\caption{Experimento entre fuentes. Dos pestañas del mismo
+navegador Chrome reproducen dos fuentes Widevine-protegidas
+distintas, cada una servida por su propio proceso utility CDM.
+Hooks idénticos confirman alcanzabilidad idéntica de las ranuras
+de gestión-de-sesión.}
 \label{fig:crosssource}
 \end{figure}
 
-\noindent Two CreateSessionAndGenerateRequest invocations and two
-UpdateSession invocations were observed. The dispatch model
-(outer-vtable thunk, m\_impl wrapper, layer-3 handler) is identical
-to what we observed in the Netflix-serving CDM utility process; the
-slot 3 and slot 5 hook code paths were exercised in the same
-sequence in both processes.
+\noindent Dos invocaciones de CreateSessionAndGenerateRequest y
+dos de UpdateSession fueron observadas. El modelo de despacho
+(thunk de la outer-vtable, wrapper m\_impl, handler de capa-3) es
+idéntico a lo que observamos en el proceso utility del CDM que
+sirve a Netflix; los caminos de código de los hooks de la ranura
+3 y la ranura 5 fueron ejercidos en la misma secuencia en ambos
+procesos.
 
-\textbf{Interpretación.} The CDM\_11 dispatch model is a binary
-property of \texttt{widevinecdm.dll}, not a property of the EME
-application that uses it. An attacker positioned to influence the
-PSSH or license payload of \emph{any} Widevine-protected source
-will see the same dispatch and the same slot reachability as one
-positioned against Netflix.
+\textbf{Interpretación.} El modelo de despacho de CDM\_11 es una
+propiedad del binario \texttt{widevinecdm.dll}, no una propiedad
+de la aplicación EME que lo usa. Un atacante posicionado para
+influenciar el payload PSSH o el de licencia de \emph{cualquier}
+fuente Widevine-protegida verá el mismo despacho y la misma
+alcanzabilidad de ranura que uno posicionado contra Netflix.
 
 \subsection{Observación arquitectural lateral: utilities CDM separados}
 
-A secondary observation worth recording is that Chrome 149 spawned
-\emph{two} CDM utility processes when Netflix and Bitmovin were
-playing simultaneously in different tabs, not one shared utility.
-This is consistent with Chromium's per-origin isolation policy and
-implies that an attacker positioned to compromise one EME
-application's CDM cannot directly observe a second EME application's
-CDM via shared in-process state.
+Una observación secundaria que vale la pena grabar es que Chrome
+149 spawnó \emph{dos} procesos utility CDM cuando Netflix y
+Bitmovin estaban reproduciéndose simultáneamente en pestañas
+diferentes, no un utility compartido. Esto es consistente con la
+política de aislamiento per-origin de Chromium e implica que un
+atacante posicionado para comprometer el CDM de una aplicación
+EME no puede observar directamente el CDM de una segunda
+aplicación EME vía estado in-process compartido.
 
 % =============================================================================
 \section{La distribución de ofuscación como capa defensiva}
 \label{sec:obfuscation}
 
-The \texttt{widevinecdm.dll} binary contains numerous functions
-whose body matches the textbook signature of mixed-boolean-arithmetic
-(MBA) obfuscation: large stack-resident magic constants written
-immediately on entry; multiplicative-hash state-advance instructions
-of the form \texttt{imul edx, ecx, 0xK ; shr edx, 0xS ; cmp eax, 0xT
-; je state\_exit}; \texttt{cmovae} branchless dispatch cascades;
-\texttt{0xaaaaaaaa} or \texttt{0xaaaaaaaaaaaaaaaa} fill patterns
-acting as poison initialiser values for stack-local state. These
-patterns are not uniformly distributed across the slot space.
+El binario \texttt{widevinecdm.dll} contiene numerosas funciones
+cuyo cuerpo coincide con la firma de libro de texto de la
+ofuscación mixed-boolean-arithmetic (MBA): constantes mágicas
+grandes residentes en stack escritas inmediatamente al entrar;
+instrucciones de avance de estado por hash multiplicativo de la
+forma \texttt{imul edx, ecx, 0xK ; shr edx, 0xS ; cmp eax, 0xT
+; je state\_exit}; cascadas de despacho sin branches con
+\texttt{cmovae};
+patrones de relleno \texttt{0xaaaaaaaa} o
+\texttt{0xaaaaaaaaaaaaaaaa} actuando como valores de
+inicialización poison para estado local del stack. Estos
+patrones no están uniformemente distribuidos a lo largo del
+espacio de ranuras.
 
 \subsection{Disposición visual}
 
-Figure~\ref{fig:obfuscation-grid} visualises the per-slot
-obfuscation status side by side with each slot's classification as
-an attacker-input slot or a passthrough slot.
+La Figura~\ref{fig:obfuscation-grid} visualiza el estado de
+ofuscación por-ranura lado a lado con la clasificación de cada
+ranura como ranura de input atacante o ranura passthrough.
 
 \begin{figure}[t]
 \centering
@@ -1682,52 +1792,56 @@ an attacker-input slot or a passthrough slot.
     \textbf{P} = passthrough (opaque blob the CDM forwards without parsing).};
 \end{tikzpicture}%
 }%
-\caption{Per-slot obfuscation status of CDM\_11. Red cells are slots
-whose layer-1 or layer-3 body matches the MBA-style obfuscation
-signature; orange cells are partial matches; green cells are clean
-across the dispatch chain; grey cells are layer-2 trampolines or
-stubs whose layer-3 handlers we report individually in
-Section~\ref{sec:obfuscation}.}
+\caption{Estado de ofuscación por-ranura de CDM\_11. Las celdas
+rojas son ranuras cuyo cuerpo de capa-1 o capa-3 coincide con la
+firma de ofuscación estilo MBA; las naranjas son matches
+parciales; las verdes son limpias a lo largo de la cadena de
+despacho; las grises son trampolines de capa-2 o stubs cuyos
+handlers de capa-3 reportamos individualmente en la
+Sección~\ref{sec:obfuscation}.}
 \label{fig:obfuscation-grid}
 \end{figure}
 
 \subsection{El patrón}
 
-Slots that obviously pass an opaque, attacker-influenced \emph{blob}
-that the CDM forwards without parsing
-(\texttt{SetServerCertificate}, \texttt{OnStorageId}) are clean at
-every layer of the dispatch. Slots that begin parsing structured
-attacker-controllable data exhibit obfuscation, though at varying
-depths. The slot that takes a textual policy
-(\texttt{GetStatusForPolicy}) is obfuscated at layer 1, where the
-parsing begins. The slots that take large structured payloads
+Las ranuras que obviamente pasan un \emph{blob} opaco
+influenciado por el atacante que el CDM reenvía sin parsear
+(\texttt{SetServerCertificate}, \texttt{OnStorageId}) están
+limpias en cada capa del despacho. Las ranuras que comienzan a
+parsear datos estructurados atacante-controlables exhiben
+ofuscación, aunque a profundidades variables. La ranura que toma
+una política textual (\texttt{GetStatusForPolicy}) está ofuscada
+en la capa 1, donde comienza el parsing. Las ranuras que toman
+payloads estructurados grandes
 (\texttt{CreateSessionAndGenerateRequest},
-\texttt{UpdateSession}) place the obfuscated processing one or two
-hops deeper, after a clean MSVC wrapper has copied the input into
-the CDM's own buffer and looked up the session. The slots involved
-in per-frame decode (\texttt{Decrypt},
-\texttt{DecryptAndDecodeFrame}) are obfuscated immediately at the
-double-trampoline target, where the cryptographic processor begins.
+\texttt{UpdateSession}) colocan el procesamiento ofuscado uno o
+dos saltos más profundo, después de que un wrapper MSVC limpio
+ha copiado el input al buffer propio del CDM y buscado la
+sesión. Las ranuras involucradas en decode por-cuadro
+(\texttt{Decrypt}, \texttt{DecryptAndDecodeFrame}) están
+ofuscadas inmediatamente en el target del double-trampoline,
+donde comienza el procesador criptográfico.
 
-This is the pattern we cautiously summarise as:
+Este es el patrón que cuidadosamente resumimos como:
 
 \begin{quote}\itshape
-CDM\_11 protects each slot at the depth at which that slot begins
-to parse structured attacker data.
+CDM\_11 protege cada ranura a la profundidad en la que esa
+ranura comienza a parsear datos estructurados del atacante.
 \end{quote}
 
-\noindent It is an architectural observation, not a security claim:
-obfuscation is not security, and we are not assessing the strength
-of the protection, only its distribution.
+\noindent Es una observación arquitectural, no una afirmación de
+seguridad: la ofuscación no es seguridad, y no estamos evaluando
+la fuerza de la protección, sólo su distribución.
 
 % =============================================================================
 \section{Estabilidad entre binarios}
 \label{sec:cross}
 
-The architectural model described in
-Section~\ref{sec:static-3layer} was developed on Edge 150
-\texttt{widevinecdm.dll}. We validated that the same model holds in
-Chrome 149 \texttt{widevinecdm.dll} by re-running the discoverer:
+El modelo arquitectural descrito en la
+Sección~\ref{sec:static-3layer} fue desarrollado sobre Edge 150
+\texttt{widevinecdm.dll}. Validamos que el mismo modelo se
+mantiene en el \texttt{widevinecdm.dll} de Chrome 149 corriendo
+nuevamente el discoverer:
 
 \begin{center}\small
 \begin{tabular}{lcc}
@@ -1743,93 +1857,106 @@ Direct-impl slots              & 3 (0, 1, 18) & 3 (0, 1, 18) \\
 \end{tabular}
 \end{center}
 
-\noindent The model also generalises across CDM interface versions
-within a single binary: in both Edge 150 and Chrome 149, the CDM\_10
-and CDM\_11 vtables exhibit identical three-layer dispatch. Their
-per-frame decrypt handler is the same physical function; their
-\texttt{Initialize} handlers diverge. This is consistent with the
-binary providing both interface versions for backward compatibility
-with older host browsers, and the CDM author choosing to share the
-implementation of the version-stable methods between the two.
+\noindent El modelo también generaliza a través de versiones de
+interfaz del CDM dentro de un único binario: tanto en Edge 150
+como en Chrome 149, las vtables CDM\_10 y CDM\_11 exhiben un
+despacho idéntico de tres capas. Su handler de descifrado
+por-cuadro es la misma función física; sus handlers
+\texttt{Initialize} divergen. Esto es consistente con que el
+binario provea ambas versiones de interfaz para
+compatibilidad-hacia-atrás con navegadores anfitriones más
+viejos, y con que el autor del CDM eligió compartir la
+implementación de los métodos estables-en-versión entre las dos.
 
-The cross-binary slot table appears as Appendix~\ref{app:slot-table}.
+La tabla de ranuras inter-binarios aparece como el
+Apéndice~\ref{app:slot-table}.
 
 % =============================================================================
 \section{Pruebas de robustez}
 \label{sec:robustness}
 
-Before publishing any claim made above, we ran a falsification
-sprint against the strongest empirical findings. The sprint
-included:
+Antes de publicar cualquier afirmación hecha más arriba,
+corrimos un sprint de falsificación contra los hallazgos
+empíricos más fuertes. El sprint incluyó:
 
 \begin{enumerate}[itemsep=2pt,topsep=2pt]
-  \item \textbf{Slot-index correctness.} The outer-vtable slot 14
-        thunk is byte-confirmed to dispatch at offset \texttt{0x70}
-        ($= 14 \cdot 8$) in the \texttt{m\_impl} vtable.
-  \item \textbf{Shape-data signal vs noise.} The 810k-event capture
-        was analysed for register-hash entropy and timing
-        distribution. Hash entropy for the two hot slots was 16{,}338
-        and 1{,}379 unique values across 395{,}580 and 414{,}459
-        invocations respectively; the rate was steady across the
-        observation window at $\sim$2.3k events/s.
-  \item \textbf{Layer-3 enumeration.} All nineteen layer-3 handlers
-        were located via either the trampoline jump target or the
-        wrapper's first non-stack-check call and were classified for
-        obfuscation status. The first version of the obfuscation
-        claim, which placed obfuscation at the \texttt{m\_impl}
-        layer, was found to be incorrect; the obfuscation is one
-        further hop deeper, and the claim was rewritten accordingly.
-  \item \textbf{Cross-binary identity.} The discoverer was rerun
-        against Chrome 149's \texttt{widevinecdm.dll}. The outer
-        vtable, slot-index mapping, and per-slot CDM\_11 method
-        identification matched the Edge 150 analysis.
-  \item \textbf{Cross-source identity.} The outer-vtable
-        instrumentation was deployed against the second CDM utility
-        spawned for a non-Netflix Widevine source (Bitmovin). Slot 3
-        and slot 5 fired in identical sequence to the Netflix
-        utility.
-  \item \textbf{CDM-instance count.} The single Netflix tab spawned
-        exactly one CDM utility process across an eight-hour
-        observation window; we did not observe a second utility
-        materialising for the same tab.
+  \item \textbf{Corrección del índice de ranura.} El thunk de la
+        ranura 14 de la outer-vtable está byte-confirmado para
+        despachar en offset \texttt{0x70} ($= 14 \cdot 8$) en la
+        vtable \texttt{m\_impl}.
+  \item \textbf{Señal vs ruido en los datos de forma.} La captura
+        de 810k eventos fue analizada por entropía del hash de
+        registros y distribución temporal. La entropía del hash
+        para las dos ranuras calientes fue 16{,}338 y 1{,}379
+        valores únicos a lo largo de 395{,}580 y 414{,}459
+        invocaciones respectivamente; la tasa fue estable a lo
+        largo de la ventana de observación a $\sim$2.3k
+        eventos/s.
+  \item \textbf{Enumeración de capa-3.} Los diecinueve handlers
+        de capa-3 fueron localizados vía el target del jump del
+        trampoline o el primer call (no-stack-check) del wrapper
+        y fueron clasificados por estado de ofuscación. La
+        primera versión de la afirmación de ofuscación, que
+        ubicaba la ofuscación en la capa \texttt{m\_impl}, fue
+        encontrada incorrecta; la ofuscación está un salto más
+        profundo, y la afirmación fue reescrita en consecuencia.
+  \item \textbf{Identidad inter-binarios.} El discoverer fue
+        re-corrido contra el \texttt{widevinecdm.dll} de Chrome
+        149. La outer vtable, el mapeo índice-de-ranura, y la
+        identificación de método CDM\_11 por-ranura coincidieron
+        con el análisis de Edge 150.
+  \item \textbf{Identidad entre fuentes.} La instrumentación de
+        la outer-vtable fue desplegada contra el segundo proceso
+        utility del CDM spawnado para una fuente Widevine
+        no-Netflix (Bitmovin). Las ranuras 3 y 5 dispararon en
+        secuencia idéntica al utility de Netflix.
+  \item \textbf{Conteo de instancias CDM.} La única pestaña de
+        Netflix spawnó exactamente un proceso utility CDM a lo
+        largo de una ventana de observación de ocho horas; no
+        observamos un segundo utility materializándose para la
+        misma pestaña.
 \end{enumerate}
 
 \subsection{Hallazgos candidatos refutados}
 \label{sec:robustness-refuted}
 
-The falsification sprint also surfaced two candidate findings that
-were refuted by deeper byte-level analysis. We document them here
-because they typify the bug-class candidates a less rigorous
-methodology would have falsely promoted:
+El sprint de falsificación también sacó a la superficie dos
+hallazgos candidatos que fueron refutados por análisis byte-level
+más profundo. Los documentamos aquí porque tipifican los
+candidatos de clase-de-bug que una metodología menos rigurosa
+hubiera falsamente promovido:
 
-\textbf{P1 (PEAuth unauth pool write):} A subagent audit of
-\texttt{peauth.sys} initially flagged an apparent unauthenticated
-kernel-pool write at offset \texttt{0x140042980} where a
-user-controlled size field at \texttt{[rdi+0x14]} appeared to be
-used as a \texttt{memcpy} length before the
-\texttt{CiGetPEInformation} signing check at
-\texttt{0x1400429ae}. Byte-level disassembly of the range
-\texttt{0x42900..0x429e0} revealed an explicit 32-bit overflow
-check (\texttt{lea r12d, [r15+rsi]; cmp r12d, r15d; jb fail}) at
-\texttt{0x42964} and an upper-bound check at \texttt{0x4296d}
-between the parameter read and the memcpy. The candidate is
-refuted; no kernel-side bug is present.
+\textbf{P1 (escritura sin autenticación al pool de PEAuth):}
+Una auditoría de subagente de \texttt{peauth.sys} inicialmente
+marcó una aparente escritura no autenticada al pool del kernel
+en offset \texttt{0x140042980} donde un campo de tamaño
+controlado por el usuario en \texttt{[rdi+0x14]} parecía ser
+usado como length para \texttt{memcpy} antes del chequeo de
+firmado \texttt{CiGetPEInformation} en \texttt{0x1400429ae}. El
+disassembly byte-level del rango \texttt{0x42900..0x429e0}
+reveló un chequeo de overflow de 32-bit explícito
+(\texttt{lea r12d, [r15+rsi]; cmp r12d, r15d; jb fail}) en
+\texttt{0x42964} y un chequeo de cota superior en
+\texttt{0x4296d} entre la lectura del parámetro y el memcpy. El
+candidato es refutado; no hay bug del lado kernel presente.
 
-\textbf{W2 (PSSH parser OOB read):} A subagent audit of CDM\_11
-flagged offsets \texttt{0x1D6E1}, \texttt{0x1D8CF},
-\texttt{0x1DB9D}, and \texttt{0x1DFB} as candidates for an
-out-of-bounds read in the PSSH/MP4-box header-size parsing
-(\texttt{mov r10d, [r{si/di}+4]}). Disassembly at those offsets
-revealed not box parsing but the round-table for an MD5 transform,
-with the operands being state-constant XORs and not buffer reads.
-The candidate is refuted; the bytes are crypto code, not parser
-code.
+\textbf{W2 (lectura OOB en el parser PSSH):} Una auditoría de
+subagente de CDM\_11 marcó los offsets \texttt{0x1D6E1},
+\texttt{0x1D8CF}, \texttt{0x1DB9D}, y \texttt{0x1DFB} como
+candidatos para una lectura out-of-bounds en el parsing del
+tamaño del header PSSH/MP4-box
+(\texttt{mov r10d, [r{si/di}+4]}). El disassembly en esos
+offsets reveló no parsing de cajas sino la round-table para una
+transformación MD5, con los operandos siendo XORs con constantes
+de estado y no lecturas de buffer. El candidato es refutado; los
+bytes son código cripto, no código de parser.
 
-These refutations and one further candidate that remained
-inconclusive established the methodological principle that any
-subagent ``high-confidence byte-verified'' claim must pass an
-independent manual byte review before being promoted to a
-publication-grade finding.
+Estas refutaciones y un candidato adicional que se mantuvo
+inconcluyente establecieron el principio metodológico de que
+cualquier afirmación de subagente ``byte-verified de alta
+confianza'' debe pasar una revisión manual byte-a-byte
+independiente antes de ser promovida a un hallazgo grado-de-
+publicación.
 
 % =============================================================================
 \section{Manual para el defensor}
@@ -1852,7 +1979,7 @@ which are unreachable from a network-positioned attacker.
 \centering\small
 \begin{tabular}{rlll}
 \toprule
-\textbf{Slot} & \textbf{Method} & \textbf{Atk reach} & \textbf{Steady-state activity} \\
+\textbf{Ranura} & \textbf{Método} & \textbf{Alcance atacante} & \textbf{Actividad en steady-state} \\
 \midrule
 0  & Initialize                       & host & once per session \\
 1  & GetStatusForPolicy               & host & rare \\
@@ -1875,70 +2002,78 @@ which are unreachable from a network-positioned attacker.
 18 & OnStorageId                      & host & rare \\
 \bottomrule
 \end{tabular}
-\caption{Per-slot attack surface and steady-state activity profile.
-``Atk reach'' is the strongest controllable source of the slot's
-arguments: \textbf{manifest} = attacker-controllable DASH/CMAF PSSH
-box from the CDN serving the manifest; \textbf{license CDN} =
-attacker-controllable license-server response (CDN MITM or
-compromised licence service); \textbf{per-frame} = ciphertext from
-the stream's media segments; \emph{host} = host-browser-supplied
-opaque value; \emph{internal} = internal CDM scheduling.
-``Steady-state activity'' summarises whether the slot fires during
-ongoing playback once a session is established.}
+\caption{Superficie de ataque por-ranura y perfil de actividad
+en steady-state. ``Alcance atacante'' es la fuente controlable
+más fuerte de los argumentos de la ranura:
+\textbf{manifest} = caja PSSH DASH/CMAF atacante-controlable
+desde el CDN que sirve el manifest; \textbf{license CDN} =
+respuesta del servidor de licencias atacante-controlable (MITM
+en el CDN o servicio de licencia comprometido);
+\textbf{per-frame} = ciphertext desde los segmentos de medio del
+stream; \emph{host} = valor opaco provisto por el navegador
+anfitrión; \emph{internal} = scheduling interno del CDM.
+``Actividad en steady-state'' resume si la ranura dispara durante
+reproducción en curso una vez que la sesión está establecida.}
 \label{tab:attack-surface}
 \end{table}
 
 \subsection{Firmas de detección}
 
-Three detection signatures fall directly out of the architecture
-and the runtime evidence.
+Tres firmas de detección salen directamente de la arquitectura
+y de la evidencia en runtime.
 
-\textbf{Signature D1 --- vtable canary.}  The outer vtable lives in
-\texttt{widevinecdm.dll}'s read-only \texttt{.rdata} section.  Each
-of the nineteen entries should point into \texttt{widevinecdm.dll}'s
-\texttt{.text}.  An EDR or in-process integrity check that reads
-the nineteen outer-vtable QWORDs after CDM initialisation and
-verifies they all resolve inside \texttt{widevinecdm.dll}'s
-\texttt{[image\_base, image\_base+image\_size)} interval will catch
-the runtime tampering pattern used by this paper's shim and by any
-other CDM-hooking tool that uses the same shape.
+\textbf{Firma D1 --- canario de vtable.} La outer vtable vive en
+la sección de sólo-lectura \texttt{.rdata} de
+\texttt{widevinecdm.dll}. Cada una de las diecinueve entradas
+debería apuntar dentro de \texttt{.text} de
+\texttt{widevinecdm.dll}. Un check de integridad in-process en
+un EDR que lea los diecinueve QWORDs de la outer-vtable después
+de la inicialización del CDM y verifique que todos resuelven
+dentro del intervalo
+\texttt{[image\_base, image\_base+image\_size)} de
+\texttt{widevinecdm.dll} atrapará el patrón de manipulación en
+runtime usado por el shim de este paper y por cualquier otra
+herramienta de hooking del CDM que use la misma forma.
 
-\textbf{Signature D2 --- CFG bitmap drift.}  Each call to
-\texttt{SetProcessValidCallTargets} inside a CDM utility process is
-itself a signal.  In normal operation, the CDM utility does not
-self-register additional CFG-valid targets; the bitmap is
-established at module load and does not grow.  A growth event after
-process steady-state, particularly one whose new valid targets lie
-outside \texttt{widevinecdm.dll}'s image range, is a strong
-indicator of an injection-and-patch attempt.
+\textbf{Firma D2 --- drift del bitmap CFG.} Cada llamada a
+\texttt{SetProcessValidCallTargets} dentro de un proceso utility
+CDM es en sí una señal. En operación normal, el utility CDM no
+auto-registra targets CFG-válidos adicionales; el bitmap se
+establece en module-load y no crece. Un evento de crecimiento
+después del steady-state del proceso, particularmente uno cuyos
+nuevos targets válidos están fuera del rango de imagen de
+\texttt{widevinecdm.dll}, es un indicador fuerte de un intento
+de inyección-y-parche.
 
-\textbf{Signature D3 --- per-frame slot activity in HW path.}  Our
-empirical finding (Section~\ref{sec:findings-dormancy}) is that
-slot 9, slot 14, and slot 15 are dormant during steady-state
-HW-decoded playback.  An in-process probe that hooks those three
-slots and observes any activity at all during HW playback has
-caught either an attacker forcing fallback to SW decode (a known
-hostile-CDN technique) or an in-renderer attacker who has not yet
-realised that the per-frame path is dormant.
+\textbf{Firma D3 --- actividad en ranuras por-cuadro en camino
+HW.} Nuestro hallazgo empírico
+(Sección~\ref{sec:findings-dormancy}) es que las ranuras 9, 14, y
+15 están dormidas durante reproducción HW-decoded en
+steady-state. Una sonda in-process que hookee esas tres ranuras
+y observe cualquier actividad durante reproducción HW ha
+atrapado o bien a un atacante forzando fallback a decode SW
+(una técnica conocida de CDN hostiles) o a un atacante in-renderer
+que aún no se dio cuenta que el camino por-cuadro está dormido.
 
 \subsection{Flujo de triage ante sospecha de CDM comprometido}
 
 \begin{enumerate}[itemsep=2pt]
-  \item Identify the suspected CDM utility process by
-        \texttt{tasklist /m widevinecdm.dll}; on a single
-        Widevine-source playback session there should be one.
-  \item Verify the outer-vtable RVA against the binary using the
-        released discoverer
-        (\S\ref{sec:static-export}). Cross-check the
-        runtime-loaded outer vtable for tampering using
-        Signature D1.
-  \item For each of slots 3, 5, 14, 15, read the QWORD at the
-        outer-vtable entry and confirm it is the original thunk.
-        Slots 14 and 15 in particular are the per-frame paths an
-        in-renderer attacker would target if they were not aware of
-        HW-decode dormancy.
-  \item Examine the CFG bitmap for additions outside
-        \texttt{widevinecdm.dll}'s image range (Signature D2).
+  \item Identificar el proceso utility CDM sospechado vía
+        \texttt{tasklist /m widevinecdm.dll}; en una sesión de
+        reproducción única-fuente Widevine debería haber uno.
+  \item Verificar el RVA de la outer-vtable contra el binario
+        usando el discoverer liberado
+        (\S\ref{sec:static-export}). Hacer cross-check de la
+        outer vtable cargada en runtime para tampering usando
+        la Firma D1.
+  \item Para cada una de las ranuras 3, 5, 14, 15, leer el
+        QWORD en la entrada de la outer-vtable y confirmar que
+        es el thunk original. Las ranuras 14 y 15 en particular
+        son los caminos por-cuadro a los que un atacante
+        in-renderer apuntaría si no estuviera al tanto de la
+        inactividad bajo decode HW.
+  \item Examinar el bitmap CFG en busca de adiciones fuera del
+        rango de imagen de \texttt{widevinecdm.dll} (Firma D2).
 \end{enumerate}
 
 % =============================================================================
@@ -1953,189 +2088,211 @@ que necesita saber qué ranuras merecen tiempo de auditoría profunda.
 
 \subsection{Qué es alcanzable y qué no}
 
-The dormancy finding (Section~\ref{sec:findings-dormancy}) is bad
-news for the obvious attack: a compromised renderer cannot
-intercept decoded frames through the CDM\_11 interface during L1
-hardware decode because the per-frame slots are not invoked. The
-attacker who wants decoded frames has to find an independent
-capability against Media Foundation PMP, the GPU driver's
-protected-surface allocator, or the user-mode side of the OPM
-contract enforced by \texttt{peauth.sys}. Those are kernel- and
-driver-class targets, an order of magnitude harder to reach from a
-renderer compromise.
+El hallazgo de inactividad
+(Sección~\ref{sec:findings-dormancy}) es mala noticia para el
+ataque obvio: un renderer comprometido no puede interceptar
+cuadros decodificados a través de la interfaz CDM\_11 durante el
+decode por hardware L1 porque las ranuras por-cuadro no son
+invocadas. El atacante que quiere cuadros decodificados tiene
+que encontrar una capacidad independiente contra Media Foundation
+PMP, contra el allocator de superficie protegida del driver de
+GPU, o contra el lado user-mode del contrato OPM que enforza
+\texttt{peauth.sys}. Esos son targets de clase
+kernel-y-driver, un orden de magnitud más difíciles de alcanzar
+desde un compromiso del renderer.
 
-The session-management slots are good news. Slot 3
-(\texttt{CreateSessionAndGenerateRequest}) ingests the PSSH box,
-which is attacker-controllable from any compromised CDN serving
-the DASH/CMAF manifest. Slot 5 (\texttt{UpdateSession}) ingests
-the license-server response, which is attacker-controllable from
-any compromised licensing endpoint or any MITM-positioned attacker.
-Both slots dispatch through a clean MSVC wrapper at the
-\texttt{m\_impl} layer and then call into an MBA-obfuscated
-layer-3 handler. The clean wrapper is auditable; the layer-3
-handler is the realistic bug-hunting target.
+Las ranuras de gestión-de-sesión son buena noticia. La ranura 3
+(\texttt{CreateSessionAndGenerateRequest}) ingiere la caja PSSH,
+que es atacante-controlable desde cualquier CDN comprometido que
+sirva el manifest DASH/CMAF. La ranura 5
+(\texttt{UpdateSession}) ingiere la respuesta del servidor de
+licencias, que es atacante-controlable desde cualquier endpoint
+de licencia comprometido o cualquier atacante MITM-posicionado.
+Ambas ranuras despachan a través de un wrapper MSVC limpio en la
+capa \texttt{m\_impl} y luego llaman a un handler de capa-3
+MBA-ofuscado. El wrapper limpio es auditable; el handler de
+capa-3 es el target realista de bug-hunting.
 
 \subsection{Dónde auditar}
 
-Concrete prioritisation for layer-3 audit time:
+Priorización concreta para tiempo de auditoría de capa-3:
 
 \begin{enumerate}[itemsep=2pt]
-  \item \textbf{Slot 3 layer-3} (Edge 150 RVA \texttt{0x21f200}).
-        PSSH/MP4-box parser, attacker-controllable from manifest.
-        Heavily MBA-obfuscated. The right tool here is structured
-        fuzzing of PSSH box mutations rather than manual disasm.
-  \item \textbf{Slot 5 layer-3} (clean wrapper at Edge 150
-        \texttt{0x1d4ab0}, dispatches into the obfuscated
-        whitebox-AES processor at \texttt{0x233bd0} via a
-        worker-thread queue). License-response parser,
-        attacker-controllable. Async path; harder to reach with
-        synchronous fuzzing.
-  \item \textbf{Slot 9 layer-3} (RVA \texttt{0x22ec00}).
-        \texttt{Decrypt} handler. Heavily MBA-obfuscated. Per the
-        dormancy finding, dormant on the HW path; would only be
-        reachable in an SW-decode scenario.
-  \item \textbf{Slot 14 layer-3} (RVA \texttt{0x230c20}).
-        \texttt{DecryptAndDecodeFrame}. Most heavily obfuscated of
-        all the handlers we measured (score 22 in our classifier).
-        Same dormancy caveat as slot 9.
+  \item \textbf{Capa-3 de ranura 3} (Edge 150 RVA
+        \texttt{0x21f200}). Parser de PSSH/MP4-box,
+        atacante-controlable desde el manifest. Fuertemente
+        MBA-ofuscado. La herramienta correcta aquí es fuzzing
+        estructurado de mutaciones de la caja PSSH antes que
+        disasm manual.
+  \item \textbf{Capa-3 de ranura 5} (wrapper limpio en Edge 150
+        \texttt{0x1d4ab0}, despacha al procesador whitebox-AES
+        ofuscado en \texttt{0x233bd0} vía una cola de
+        worker-thread). Parser de respuesta-de-licencia,
+        atacante-controlable. Camino async; más difícil de
+        alcanzar con fuzzing sincrónico.
+  \item \textbf{Capa-3 de ranura 9} (RVA \texttt{0x22ec00}).
+        Handler de \texttt{Decrypt}. Fuertemente MBA-ofuscado.
+        Según el hallazgo de inactividad, dormido en el camino
+        HW; sólo sería alcanzable en un escenario de decode SW.
+  \item \textbf{Capa-3 de ranura 14} (RVA \texttt{0x230c20}).
+        \texttt{DecryptAndDecodeFrame}. El más fuertemente
+        ofuscado de todos los handlers que medimos (puntaje 22
+        en nuestro clasificador). Mismo caveat de inactividad que
+        la ranura 9.
 \end{enumerate}
 
 \subsection{Lo que no es el objetivo correcto}
 
-Slot 2 (\texttt{SetServerCertificate}) and slot 18
-(\texttt{OnStorageId}) both pass opaque blobs that the CDM
-forwards without parsing. The clean dispatch chain at both layers
-is the empirical signal that there is nothing to audit there.
-Spending audit time on these slots is consistent with the failure
-mode of audits that assume all critical-path slots are obfuscated;
-they are not.
+La ranura 2 (\texttt{SetServerCertificate}) y la ranura 18
+(\texttt{OnStorageId}) ambas pasan blobs opacos que el CDM
+reenvía sin parsear. La cadena de despacho limpia en ambas capas
+es la señal empírica de que no hay nada que auditar ahí. Gastar
+tiempo de auditoría en estas ranuras es consistente con el modo
+de fallo de auditorías que asumen que todas las ranuras de
+camino-crítico están ofuscadas; no lo están.
 
 % =============================================================================
 \section{Generalizabilidad}
 \label{sec:generalisability}
 
-El CDM Widevine L1 en Windows es uno de tres runtimes comerciales de
-DRM de escritorio que un investigador podría ser invitado a mapear.
-Microsoft PlayReady viene en el IE-mode de Edge y dentro del stack
-\texttt{Windows.Media.Protection.MediaProtectionManager} stack.
-Apple FairPlay ships in Safari on macOS and in TV.app. Both expose
-a host-CDM contract that is, at the level of abstraction this paper
-operates at, very similar to Widevine's CDM\_11 contract: a small
-number of host-callable methods, an opaque library that
-constructs an instance of a versioned interface, an internal
-dispatch path that does the actual work.
+El CDM Widevine L1 en Windows es uno de tres runtimes comerciales
+de DRM de escritorio que un investigador podría ser invitado a
+mapear. Microsoft PlayReady viene en el IE-mode de Edge y dentro
+del stack
+\texttt{Windows.Media.Protection.MediaProtectionManager}. Apple
+FairPlay viene en Safari sobre macOS y dentro de TV.app. Ambos
+exponen un contrato host-CDM que es, al nivel de abstracción al
+que opera este paper, muy similar al contrato CDM\_11 de
+Widevine: una cantidad chica de métodos host-callable, una
+biblioteca opaca que construye una instancia de una interfaz
+versionada, un camino interno de despacho que hace el trabajo
+real.
 
-The methodology we release is parameterised so that it generalises
-across these targets with minimal modification:
+La metodología que liberamos está parametrizada para que
+generalice a estos targets con mínima modificación:
 
 \begin{itemize}[itemsep=2pt]
-  \item The \texttt{cdm\_arch\_discover.py} discoverer locates a
-        constructor's vtable-installation pattern in any PE binary
-        by structural search; the only Widevine-specific assumption
-        is the export name \texttt{CreateCdmInstance}, which a
-        researcher applying this to PlayReady or FairPlay
-        substitutes with the relevant entry point.
-  \item The shape-only shim's hook semantics are independent of
-        the per-slot signature; each \texttt{WvHookSlotN} takes the
-        full callee-save register tuple. The same shape applies to
-        a PlayReady or FairPlay vtable that uses a different
-        signature shape per slot.
-  \item The CFG bypass via \texttt{SetProcessValidCallTargets}
-        is a Windows-process-level mitigation, not a Widevine-level
-        one. It applies unchanged to any Windows process that
-        loads a third-party library and enables CFG.
+  \item El discoverer \texttt{cdm\_arch\_discover.py} localiza
+        el patrón de instalación-de-vtable de un constructor en
+        cualquier binario PE por búsqueda estructural; el único
+        supuesto Widevine-específico es el nombre del export
+        \texttt{CreateCdmInstance}, que un investigador
+        aplicando esto a PlayReady o FairPlay sustituye por el
+        entry point relevante.
+  \item La semántica de hook del shim shape-only es
+        independiente de la firma por-ranura; cada
+        \texttt{WvHookSlotN} toma la tupla completa de
+        callee-save de registros. La misma forma aplica a una
+        vtable de PlayReady o FairPlay que usa una forma de
+        firma diferente por ranura.
+  \item El bypass de CFG vía \texttt{SetProcessValidCallTargets}
+        es una mitigación a nivel de proceso de Windows, no a
+        nivel Widevine. Aplica sin cambios a cualquier proceso
+        de Windows que cargue una biblioteca de tercero y
+        habilite CFG.
 \end{itemize}
 
-A separate paper on each of PlayReady and FairPlay applying this
-methodology is, we hope, follow-on work that future researchers
-will produce. The Buchanan model that constrains the methodology
-to shape-only observation is the same in all three cases.
+Un paper separado sobre cada uno de PlayReady y FairPlay
+aplicando esta metodología es, esperamos, trabajo follow-on que
+futuros investigadores producirán. El modelo Buchanan que
+restringe la metodología a observación shape-only es el mismo
+en los tres casos.
 
 \subsection*{Para investigadores que sigan}
 
-Two of the paper's design choices are intended to short-circuit
-common dead ends in follow-on work.
+Dos de las decisiones de diseño de este paper están pensadas
+para cortocircuitar caminos sin salida comunes en trabajo
+follow-on.
 
-First, the methodology is structured to be applied to any future
-\texttt{widevinecdm.dll} build with no manual RVA editing. The
-discoverer locates the outer vtable from the binary alone; the
-runtime instrumentation script takes the discovered RVA as a
-parameter. Re-running the same methodology against a future Chrome
-stable, or against the \texttt{libwidevinecdm.so} variants that
-ship on Linux and Chrome OS, is mostly a matter of running the
-discoverer.
+Primero, la metodología está estructurada para ser aplicada a
+cualquier build futuro de \texttt{widevinecdm.dll} sin edición
+manual de RVAs. El discoverer localiza la outer vtable desde el
+binario solo; el script de instrumentación en runtime toma el
+RVA descubierto como un parámetro. Re-correr la misma metodología
+contra un Chrome stable futuro, o contra las variantes
+\texttt{libwidevinecdm.so} que vienen en Linux y Chrome OS, es
+mayormente cuestión de correr el discoverer.
 
-Second, the false-start narrative in
-Section~\ref{sec:static-false} is intended to head off two common
-dead ends that look superficially correct. Researchers entering
-this RE space should expect to encounter several internal
-nineteen-slot dispatch surfaces that are \emph{not} the public
-CDM\_11 vtable, and should expect the first-attempt
-obfuscation-attribution layer to be wrong by one indirection. The
-constructor-trace pivot from \texttt{CreateCdmInstance} is the
-reliable disambiguator.
+Segundo, la narrativa de falsos arranques en la
+Sección~\ref{sec:static-false} está pensada para evitar dos
+caminos sin salida comunes que se ven superficialmente correctos.
+Los investigadores entrando a este espacio de RE deberían esperar
+encontrarse con varias superficies internas de despacho de
+diecinueve ranuras que \emph{no} son la vtable pública de
+CDM\_11, y deberían esperar que la capa de
+atribución-de-ofuscación del primer intento esté incorrecta en
+una indirección. El pivote de traza-de-constructor desde
+\texttt{CreateCdmInstance} es el desambiguador confiable.
 
 % =============================================================================
 \section{Ética, disclosure, y lo que no hicimos}
 \label{sec:ethics}
 
-This study contains no:
+Este estudio no contiene:
 \begin{itemize}[itemsep=1pt,topsep=2pt]
-\item decrypted frame, in any form, captured to disk, sent over IPC,
-      or retained transiently across the run of the shim;
-\item ciphertext byte, transient or persistent, retrieved through
-      the shim;
-\item key material, content key, key wrap, or content-encryption
-      key, captured at any layer;
-\item attack against \texttt{peauth.sys}, the Windows PMP, or any
-      decoder-side component positioned to materialise a decoded
-      frame;
-\item exploit code, weaponized shim, or off-the-shelf
-      content-circumvention tool;
-\item production network attack against Netflix, Bitmovin, or any
-      EME application studied;
-\item reverse-engineering result we cannot reproduce from the
-      released source-only methodology against the same binary.
+\item ningún cuadro descifrado, en ninguna forma, capturado a
+      disco, enviado por IPC, ni retenido transitoriamente a
+      través del run del shim;
+\item ningún byte de ciphertext, transitorio o persistente,
+      recuperado a través del shim;
+\item ningún material de clave, clave de contenido, key wrap, ni
+      clave de cifrado de contenido, capturado en ninguna capa;
+\item ningún ataque contra \texttt{peauth.sys}, el PMP de
+      Windows, ni cualquier componente del lado decoder
+      posicionado para materializar un cuadro decodificado;
+\item ningún código de exploit, shim weaponizado, ni herramienta
+      de circumvención de contenido de estante;
+\item ningún ataque de red sobre producción contra Netflix,
+      Bitmovin, ni ninguna aplicación EME estudiada;
+\item ningún resultado de ingeniería inversa que no podamos
+      reproducir desde la metodología solo-fuente liberada
+      contra el mismo binario.
 \end{itemize}
 
-We have forensically verified the absence of content bytes in every
-artefact we produced. The captured shape logs are pure ASCII JSON
-totalling $\sim$56~MB and contain only the metadata fields described
-in Section~\ref{sec:runtime-shape}. The unique \texttt{key\_id}
-hash count in the captured runtime events is zero: the code path
-that would have computed a hash of a Netflix key\_id was never
-exercised at runtime, because the slots that take an
-\texttt{InputBuffer\_2*} argument were not invoked.
+Hemos verificado forensicamente la ausencia de bytes de contenido
+en cada artefacto que produjimos. Los logs de forma capturados
+son JSON puro ASCII totalizando $\sim$56~MB y contienen sólo los
+campos de metadata descritos en la
+Sección~\ref{sec:runtime-shape}. El conteo de hashes únicos de
+\texttt{key\_id} en los eventos runtime capturados es cero: el
+camino de código que hubiera computado un hash de un key\_id de
+Netflix nunca fue ejercido en runtime, porque las ranuras que
+toman un argumento \texttt{InputBuffer\_2*} no fueron invocadas.
 
-No vendor was notified prior to this submission because the work
-does not constitute a vulnerability report. We will coordinate with
-Google's Chrome Vulnerability Reward Program and the relevant
-Widevine security channels prior to any future submission of
-exploit-class findings derived from the methodology here.
+Ningún vendor fue notificado antes de esta submission porque el
+trabajo no constituye un reporte de vulnerabilidad. Coordinaremos
+con el Chrome Vulnerability Reward Program de Google y los
+canales de seguridad de Widevine relevantes antes de cualquier
+submission futura de hallazgos clase-exploit derivados de la
+metodología aquí.
 
 % =============================================================================
 \section{Conclusión}
 \label{sec:conclusion}
 
-Hemos presentado un modelo arquitectural verificado byte-a-byte del
-Widevine CDM\_11 dispatch as it ships in two representative
-representativos de la familia Chromium, y un mapa empírico
-which CDM\_11 slots are exercised during steady-state
-reproducción Netflix hardware-decoded en steady-state. Las ranuras
-por-cuadro de cara al usuario están dormidas bajo decode por hardware
-table generates $\sim$2.3k events per second of cryptographic or
-scheduler activity that is invisible from the EME boundary. The
-session-management slots remain reachable and exercise the same
-dispatch path regardless of whether the host EME application is
-Netflix or a non-commercial Widevine test source. The library
-distributes mixed-boolean-arithmetic obfuscation across the slot
-space in a pattern that mirrors the depth at which each slot
-begins to parse structured attacker-influenced data.
+Hemos presentado un modelo arquitectural verificado byte-a-byte
+del despacho moderno de Widevine CDM\_11 tal como viene en dos
+navegadores representativos de la familia Chromium, y un mapa
+empírico runtime-confirmado de qué ranuras de CDM\_11 se
+ejercen durante reproducción Netflix hardware-decoded en
+steady-state. Las ranuras por-cuadro de cara al usuario están
+dormidas bajo decode por hardware L1 mientras una tabla de
+despacho interna genera $\sim$2.3k eventos por segundo de
+actividad criptográfica o de scheduler que es invisible desde
+el límite EME. Las ranuras de gestión-de-sesión siguen siendo
+alcanzables y ejercen el mismo camino de despacho sin importar
+si la aplicación EME anfitriona es Netflix o una fuente de
+prueba Widevine no-comercial. La biblioteca distribuye
+ofuscación mixed-boolean-arithmetic a lo largo del espacio de
+ranuras en un patrón que refleja la profundidad a la que cada
+ranura comienza a parsear datos estructurados
+influenciados-por-atacante.
 
-The work is situated in two decades of prior DRM research, follows
-the Buchanan model of architectural-only publication, and produces
-no extraction artefact. The methodology and all source needed to
-reproduce the empirical results are released alongside the paper.
+El trabajo está situado en dos décadas de investigación previa
+de DRM, sigue el modelo Buchanan de publicación
+sólo-arquitectural, y no produce artefacto de extracción. La
+metodología y todo el código fuente necesario para reproducir
+los resultados empíricos se liberan junto al paper.
 
 % =============================================================================
 \bibliographystyle{plain}
@@ -2322,10 +2479,10 @@ GitHub, 2008--present.
 \section{Esquema del log de forma}
 \label{app:schema}
 
-The captured JSONL events use one of two shapes.
+Los eventos JSONL capturados usan una de dos formas.
 
-\textbf{Generic call} (for slots that are not
-\texttt{InputBuffer\_2}-consuming):
+\textbf{Llamada genérica} (para ranuras que no consumen
+\texttt{InputBuffer\_2}):
 \begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
 {
   "kind" : "call",
@@ -2336,7 +2493,7 @@ The captured JSONL events use one of two shapes.
 }
 \end{lstlisting}
 
-\textbf{Shape} (for slots 9, 14, 15):
+\textbf{Forma} (para las ranuras 9, 14, 15):
 \begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
 {
   "kind" : "ib",
@@ -2356,10 +2513,10 @@ The captured JSONL events use one of two shapes.
 }
 \end{lstlisting}
 
-Notably absent fields:
-\texttt{data}, \texttt{key\_id} bytes, \texttt{iv} bytes,
-\texttt{subsamples} array, output-frame contents,
-content-encryption key, key-wrap key, OEMCrypto internal state.
-These are deliberately omitted.
+Campos notablemente ausentes:
+\texttt{data}, bytes de \texttt{key\_id}, bytes de \texttt{iv},
+array \texttt{subsamples}, contenido del cuadro de salida,
+clave de cifrado de contenido, clave de key-wrap, estado interno
+de OEMCrypto. Estos están deliberadamente omitidos.
 
 \end{document}
