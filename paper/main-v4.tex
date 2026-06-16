@@ -1,0 +1,2355 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, urlcolor=blue, linkcolor=blue, citecolor=blue}
+\usepackage{listings}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{caption}
+\captionsetup{font=small}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric,arrows.meta,positioning,decorations.pathreplacing,backgrounds,fit,calc,patterns}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{setspace}
+\linespread{1.10}
+
+% Typography / page-break behaviour
+\raggedbottom
+\sloppy
+\widowpenalty=10000
+\clubpenalty=10000
+
+% Top-level \section{...} should start on a fresh page
+\let\oldsection\section
+\renewcommand{\section}{\clearpage\oldsection}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=6pt,
+  xleftmargin=2em
+}
+
+\tikzset{
+  cdmbox/.style={draw, rounded corners=2pt, minimum height=0.8cm, font=\small, align=center},
+  thinarrow/.style={-{Stealth[length=2mm,width=1.5mm]}, thick},
+  fatarrow/.style={-{Stealth[length=3mm,width=2mm]}, very thick},
+  layerbox/.style={draw, rounded corners=3pt, minimum height=1.4cm, minimum width=9cm, font=\small, align=left, inner sep=4pt},
+  slotcell/.style={draw, minimum width=0.85cm, minimum height=0.7cm, font=\scriptsize, align=center, inner sep=2pt},
+}
+
+\title{Inside L1 Widevine on Windows:\\
+The Three-Layer Dispatch Nobody Mapped,\\
+and the Per-Frame Slots That Never Fire}
+
+\author{
+  Jeremy Erazo (\texttt{trexnegr0}) \\
+  Independent security researcher \\
+  \texttt{mendozayt13@gmail.com}
+}
+
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\vspace{-10pt}
+\begin{center}
+\fbox{\begin{minipage}{0.92\columnwidth}\small
+\textbf{Executive summary.}
+The Widevine L1 CDM that ships in every Chromium-family browser on
+Windows has, until now, been a black box to anyone outside Google.
+This paper opens it.  Three concentric vtables, nineteen public CDM\_11
+slots, byte-verified in two browser builds.  A runtime-confirmed
+empirical map of which slots are actually exercised during real
+hardware-decoded streaming.  An MBA-style obfuscation distribution
+across the slot space that mirrors the depth of attacker-data
+parsing.  Reachability tables for both Netflix and a non-Netflix
+public Widevine source.  And, throughout, a methodology that
+captures all of it without ever reading a content byte, a content
+key, or an IV from CDM memory.  Defenders take home a per-slot
+attack-surface table and detection signatures; attackers take home a
+disambiguation of which slots they have to live with.  Source release
+of the full methodology accompanies the paper; no extraction artefact
+or weaponised exploit is released.
+\end{minipage}}
+\end{center}
+\vspace{8pt}
+
+\begin{abstract}
+\noindent
+Widevine Content Decryption Module (CDM) ships in essentially every
+major desktop browser and underlies the Encrypted Media Extensions
+(EME) playback path for every major commercial streaming service.
+The internals of the Windows L1 build are documented only
+fragmentarily: header files describe the C++ ABI it presents to the
+host browser, but the binary itself is closed source, partially
+obfuscated, and behaves differently depending on whether the host
+delegates decode to hardware-protected pipelines.
+This paper presents a Buchanan-style architectural reverse engineering
+of the CDM\_11 implementation as it ships in Chrome 149 and Edge 150
+on Windows 11. We identify a \emph{three-layer dispatch model} (outer
+vtable thunks, an intermediate \texttt{m\_impl} vtable of clean
+wrappers and double-trampolines, and per-slot handler bodies), we
+locate each layer byte-by-byte in both binaries, and we empirically
+characterise which slots are invoked during steady-state playback
+versus which are dormant. We runtime-confirm that during
+hardware-decoded Netflix playback the user-facing per-frame slots of
+the CDM\_11 interface (\texttt{Decrypt},
+\texttt{DecryptAndDecodeFrame}, \texttt{DecryptAndDecodeSamples}) do
+not fire while an internal singleton dispatch table generates
+$\sim$2{,}300 calls per second of crypto / scheduler work that is
+invisible from the EME boundary. We document the distribution of
+mixed-boolean-arithmetic style obfuscation across the slot space and
+show that it is concentrated where the CDM begins to parse
+attacker-controllable structured data, while remaining absent on slots
+that pass opaque blobs. We then verify reachability of the
+session-management slots from two distinct EME applications (Netflix
+and a public Widevine test source) and show identical dispatch
+behaviour. The paper situates this work in two decades of prior DRM
+research, surveys the legal and methodological precedents, and
+documents both the successful paths and the false starts that
+characterised the reverse engineering process. No content key, frame
+buffer, or ciphertext byte is captured at any point in the study.
+\end{abstract}
+
+% =============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Modern desktop video DRM is the bridge between commercial streaming
+services and the browser's media pipeline. When a user plays a video
+in Netflix, Amazon Prime, Disney+ or any other Widevine-protected
+source, the browser invokes Encrypted Media Extensions (EME) to
+delegate the cryptographic operations to a Content Decryption Module
+(CDM). In Chromium-based browsers on Windows, that CDM is the
+proprietary \texttt{widevinecdm.dll} library shipped by
+Google~\cite{widevine-spec}. The browser loads the library inside a
+Mojo utility process
+(\texttt{--utility-sub-type=media.mojom.\\CdmServiceBroker}), connects
+to it over IPC, and asks the library to construct a CDM instance
+implementing a stable C++ interface defined in
+\texttt{content\_decryption\_module.h}~\cite{chromium-cdm-api}.
+From the host's point of view the interface is small (nineteen
+virtual methods) and well documented: \texttt{Initialize},
+\texttt{GetStatusForPolicy}, \texttt{CreateSessionAndGenerateRequest},
+\texttt{UpdateSession}, and twelve other methods that cover license
+exchange, decryption, decode, and lifecycle.
+
+From the \emph{library}'s point of view this clean nineteen-method
+surface is the visible peak of a much larger iceberg. The Windows L1
+build of Widevine implements a multi-million-instruction obfuscated
+runtime under tens of megabytes of closed source code, integrates
+with Windows Protected Media Path (PMP) when hardware decode is
+available, and is bound by a strict licensing regime that prohibits
+study of its decryption internals. Public knowledge of the
+implementation is fragmentary: the Chromium tree contains the
+\emph{host-side} of the EME plumbing, several academic and
+hobbyist projects have studied the \emph{Android L3} variant
+\cite{quarkslab-widevine, l3-decryptor}, but the desktop Windows
+L1 variant has received comparatively little architectural attention
+in the open literature.
+
+The motivation for this study is methodological as much as it is
+technical. Several recent legal episodes have shown that
+\emph{publishing what one learns} about DRM internals is more legally
+exposed than \emph{learning it}, and that the reproducibility of a
+result matters as much as the result itself
+\cite{sklyarov-case, dvdjon-norway, hadad-case}. Following the
+Buchanan model of architectural reverse engineering \cite{buchanan-blog,
+buchanan-imessage} --- probe everything, document the technique,
+publish no extraction artefact --- we set out to build a fully
+reproducible, fully open methodology for studying the Widevine CDM
+and to apply it to the questions that are paper-able without
+crossing the digital-rights-management circumvention line.
+
+\subsection*{What is new}
+
+\begin{enumerate}[itemsep=4pt,topsep=2pt]
+  \item \textbf{The first public architectural map of L1
+        \texttt{widevinecdm.dll} on Windows.}  Three concentric
+        vtables, every entry classified, every dispatch offset
+        byte-verified.  Cross-validated in Chrome 149 and Edge 150.
+        Drop-in reproducible against any future build via the
+        released parameter-free discoverer.
+
+  \item \textbf{Hardware-decode dormancy, runtime-confirmed.}  Four
+        outer-vtable slots patched in a single experiment.  Across
+        90+ seconds of continuous 4K HDR Netflix playback,
+        \(g\_calls = 0\) on slot 14
+        (\texttt{DecryptAndDecodeFrame}), slot 15
+        (\texttt{DecryptAndDecodeSamples}), and slot 9
+        (\texttt{Decrypt}) simultaneously.  Per-frame work on L1
+        does not traverse the public CDM interface; the EME-facing
+        attack surface for per-frame interception is, for practical
+        purposes, empty.
+
+  \item \textbf{A per-slot attack-surface table.}  Which slots
+        ingest attacker-controllable structured input (PSSH,
+        license response, policy), which slots pass opaque blobs,
+        which slots are dormant.  Cross-source consistent: Netflix
+        and Bitmovin Widevine demo exercise the same slots in the
+        same order.  Defenders use the table directly to scope
+        detection; attackers use it directly to prioritise the
+        layer-3 handlers that actually matter.
+
+  \item \textbf{MBA-style obfuscation, mapped depth-relative.}  Each
+        of the nineteen CDM\_11 slots characterised at every layer of
+        the dispatch.  Obfuscation lives at varying depths,
+        consistently appearing where structured attacker data
+        begins to be parsed and consistently absent on
+        passthrough slots.  Concrete examples with byte-level
+        signatures for each.
+
+  \item \textbf{A methodology that travels.}  The
+        \emph{shape-only observation} pattern is generalisable to
+        any closed-source binary with a stable interface.  The
+        same hook design applies, unchanged in shape, to PlayReady's
+        \texttt{PlayReadyHost}, FairPlay's
+        \texttt{AppleSpringboard}, or any other host-CDM contract
+        where the question is \emph{which entries fire when} and
+        the answer must not capture content.  We release the
+        Buchanan-style framework as a methodology contribution in
+        its own right.
+
+  \item \textbf{Defender's playbook and attacker's reading.}  Two
+        explicit sections that translate the findings into concrete
+        action.  Detection signatures, hook canaries, behavioural
+        profiles, and per-slot prioritisation for both sides.
+
+  \item \textbf{Reproducible and falsifiable.}  Every empirical claim
+        anchors to a recorded experimental run.  Every architectural
+        claim is rederivable from the public binary by the released
+        discoverer.  The falsification sprint that preceded
+        publication is documented in full.
+\end{enumerate}
+
+\subsection*{Paper roadmap}
+
+The paper proceeds as follows. Section~\ref{sec:antecedents} situates
+this work in two decades of prior reverse engineering of commercial
+DRM and the legal precedents that have shaped it.
+Section~\ref{sec:background} introduces the Widevine licensing
+levels, the EME dispatch path, the Mojo IPC architecture used by
+Chromium for CDM hosting, the Windows PMP boundary, the Common
+Encryption format (CENC) used by all Widevine content, and the PSSH
+box structure that carries attacker-controllable initialisation data.
+Section~\ref{sec:threat} states the threat model and ethical scope.
+Section~\ref{sec:static} walks through the static reverse engineering
+of CDM\_11 in detail, with concrete disassembly listings.
+Section~\ref{sec:runtime} describes the runtime instrumentation,
+including the design subtleties of CIG bypass, CFG bitmap
+registration, and the per-slot back-pointer chain.
+Section~\ref{sec:findings} presents the empirical findings.
+Section~\ref{sec:obfuscation} treats the obfuscation distribution as
+its own architectural defence. Section~\ref{sec:cross} establishes
+cross-binary and cross-source stability. Section~\ref{sec:robustness}
+reports on the falsification tests, including the candidate findings
+that were refuted by deeper analysis. Section~\ref{sec:discussion}
+discusses what the model implies for both attackers and defenders of
+desktop DRM. Section~\ref{sec:ethics} states what was not done and
+why. Section~\ref{sec:conclusion} concludes.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=0.6cm and 1.2cm]
+  \node[cdmbox, fill=blue!10, minimum width=3.2cm] (renderer) {Renderer process\\\scriptsize JavaScript + EME};
+  \node[cdmbox, fill=gray!15, right=of renderer, minimum width=3.2cm] (browser) {Browser process\\\scriptsize CDM dispatcher};
+  \node[cdmbox, fill=orange!15, below=of browser, minimum width=4.2cm] (utility) {CDM utility process\\\scriptsize \texttt{--utility-sub-type=}\\\scriptsize \texttt{media.mojom.CdmServiceBroker}};
+  \node[cdmbox, fill=red!12, below=of utility, minimum width=4.2cm] (wvdll) {\texttt{widevinecdm.dll}\\\scriptsize 19-method CDM\_11 interface};
+  \node[cdmbox, fill=yellow!20, below=of wvdll, minimum width=4.2cm] (cdmobj) {CDM\_11 instance\\\scriptsize 3-layer dispatch (this paper)};
+
+  \draw[thinarrow] (renderer) -- node[above,font=\scriptsize] {EME events} (browser);
+  \draw[thinarrow] (browser.south) -- node[right,font=\scriptsize,xshift=2pt] {Mojo IPC} (utility.north);
+  \draw[thinarrow] (utility) -- node[right,font=\scriptsize,xshift=2pt] {\texttt{LoadLibrary}} (wvdll);
+  \draw[thinarrow] (wvdll) -- node[right,font=\scriptsize,xshift=2pt] {\texttt{CreateCdmInstance(11)}} (cdmobj);
+\end{tikzpicture}
+\caption{End-to-end Widevine EME dispatch on Chromium-family browsers
+on Windows. The host browser delegates Encrypted Media Extensions
+operations through Mojo IPC to a utility process whose sole purpose is
+to load \texttt{widevinecdm.dll} and expose its CDM\_11 interface.
+This paper studies the dispatch model that sits between the
+\texttt{CreateCdmInstance}-returned interface and the per-slot
+handlers inside the library.}
+\label{fig:system-overview}
+\end{figure}
+
+% =============================================================================
+\section{Antecedents and Related Work}
+\label{sec:antecedents}
+
+DRM reverse engineering occupies an unusual corner of security
+research: it spans applied cryptography, binary reverse engineering,
+copyright law, vendor relationships, and (sometimes) criminal
+prosecution. The methodology we follow in this paper did not emerge
+in a vacuum; it is shaped by two decades of prior work, some of
+which produced excellent technical results and some of which
+produced excellent technical results \emph{and} adverse legal
+outcomes for the researcher. This section surveys the prior art and
+explains which precedents informed the methodological choices made
+here.
+
+\subsection{The Buchanan model}
+\label{sec:ante-buchanan}
+
+The methodological framework we follow is most clearly articulated
+in the recent work of David Buchanan
+\cite{buchanan-blog, buchanan-imessage, buchanan-t2}. Buchanan's
+research notably includes the reverse engineering of Apple's
+iMessage NaCl-based key wrap, the Apple T2 security chip's secure
+boot chain, and an arbitrary-image bug in the iOS image decoder
+chain (CVE-2023-4863).
+
+The defining property of Buchanan's published work, for our
+purposes, is the strict separation of \emph{architectural
+description} from \emph{exploitable artefact}. His public output
+documents how a system is structured and where its trust boundaries
+sit; the controlled proofs of concept that accompany the writeups
+demonstrate the bug class without producing a tool that
+straightforwardly enables abuse against unrelated victims. He has
+publicly described the resulting publication discipline as: probe
+everything, document the technique, publish the architecture, do
+not publish the artefact that would let arbitrary readers
+materialise the impact.
+
+For DRM research this distinction matters: 17~U.S.C.~§1201
+(the DMCA's anti-circumvention provision) and its international
+equivalents prohibit the publication of tools or technologies whose
+\emph{primary} use is the circumvention of a technological
+protection measure. An architectural description of a CDM is not
+such a tool. A frame ripper that consumes the same architectural
+description and produces decrypted Netflix MP4s plainly is. The
+gap is the line we are careful not to cross.
+
+\subsection{Hacking the Xbox and the bunnie tradition}
+\label{sec:ante-bunnie}
+
+Andrew ``bunnie'' Huang's work on console reverse engineering ---
+the original Xbox \cite{bunnie-xbox-book}, the NeTV project's
+HDCP-handling video pipeline \cite{bunnie-nettv}, and the Novena
+laptop --- demonstrated a sustainable model for DRM-adjacent
+research that was simultaneously useful, publishable, and not the
+subject of vendor litigation. The NeTV project in particular is
+significant: HDCP is a copyright-protection measure under U.S.
+law, and the project required EFF-coordinated correspondence with
+the Library of Congress to confirm that an architectural
+demonstration that does not capture, redistribute, or facilitate
+the redistribution of protected content remains lawful under the
+DMCA's exemption framework.
+
+Huang's recurring observation is that the legal exposure attaches
+to the \emph{exhibition} of a circumvention capability and the
+\emph{distribution} of tools that perform it, not to the act of
+characterising a system. The CDM\_11 dispatch model described in
+this paper would be obviously useful to an attacker who already
+possessed an independent capability to receive encrypted Widevine
+content and obtain valid licenses; it would be of essentially no
+use to a casual attacker who did not. That distribution of utility
+is, in our view, on the right side of the bunnie line.
+
+\subsection{Sklyarov, DVD-Jon, and the legal frontier}
+\label{sec:ante-legal}
+
+The cases of \textbf{Dimitry Sklyarov} and \textbf{Jon Lech
+Johansen} bracket the legal frontier of DRM research.
+
+Sklyarov, a Russian developer for ElcomSoft, was arrested in 2001
+at DEF~CON for his work on the Advanced eBook Processor, which
+could convert Adobe's protected eBooks into PDF~\cite{sklyarov-case}.
+The prosecution proceeded against ElcomSoft (Sklyarov was eventually
+released after agreeing to testify). The arrest, the trial, and the
+eventual acquittal of ElcomSoft on the criminal charges established
+two relevant precedents: (i) prosecutors will treat a tool whose
+output is the cleartext form of a protected work as
+``primarily used to circumvent,'' even if the underlying research is
+academically defensible; (ii) merely \emph{describing} the
+circumvention technique, without distributing a tool that performs
+it, was not the basis for the prosecution.
+
+Jon Lech Johansen, ``DVD-Jon,'' was prosecuted by Norwegian
+authorities (acquitted twice, eventually finally) for his role in
+the development of DeCSS, the tool that broke CSS scrambling on
+DVDs~\cite{dvdjon-norway}. The Norwegian courts held that
+Johansen's work on his \emph{own} DVD player was lawful, even
+though the resulting tool was redistributed widely on the
+internet. The U.S. case of \emph{Universal v.~Reimerdes} held that
+the \emph{posting} of DeCSS on a website was actionable circumvention
+of the DMCA, regardless of the lawfulness of the underlying
+research~\cite{decss-2600}.
+
+The composite lesson from these cases informs our publication
+discipline: an architectural description is not a tool; a tool that
+materialises decrypted content is a tool. We publish the
+architectural description and the controlled validation framework
+that proves the description correct; we do not publish a tool.
+
+\subsection{Academic work on Widevine}
+\label{sec:ante-widevine}
+
+The Widevine ecosystem has received attention from several academic
+and corporate-research groups, primarily focused on the Android L3
+variant.
+
+\textbf{Quarkslab} published a series of analyses of Widevine on
+Android beginning in 2018~\cite{quarkslab-widevine,
+quarkslab-android-widevine}. Their work characterised the
+OEMCrypto-protected components of the Widevine SDK and demonstrated
+that the L3 keybox-based protection model relied substantially on
+software obfuscation that could be peeled back with whitebox-crypto
+attack techniques. The L3 decryptor projects~\cite{l3-decryptor,
+ango-l3-decryptor} that followed --- mostly published as
+research-grade open-source --- demonstrated end-to-end Widevine~L3
+content extraction from the protected library. Google's response was
+to deprecate L3 web-browser support and accelerate the migration to
+L1.
+
+\textbf{Check Point Research} has periodically analysed Widevine on
+Android handsets, identifying specific keybox extraction
+vulnerabilities and bug classes in the OEMCrypto
+TrustZone~\cite{checkpoint-widevine}. Their reports
+were coordinated with Google and the vendor before publication.
+
+\textbf{Romain Thomas and collaborators} at Quarkslab have published
+extensively on practical reverse engineering tools that we use here,
+including the LIEF library for cross-platform binary parsing
+\cite{lief-tool} and several blog posts on whitebox crypto in
+commercial DRM. Their tool work is directly upstream of the
+methodology used in this paper for static analysis of
+\texttt{widevinecdm.dll}.
+
+There is, to our knowledge, no published academic study of the
+Windows L1 CDM dispatch internals as such. The work nearest in
+spirit is a handful of blog posts and forum threads that document
+specific issues (e.g., the \texttt{libwidevinecdm.so} symbol layout
+on Linux, the CDM ABI changes between major versions) without
+proposing a generalisable architectural model. This is the gap the
+present paper attempts to fill for the Windows L1 build.
+
+\subsection{Whitebox cryptography and MBA obfuscation}
+\label{sec:ante-whitebox}
+
+The obfuscation patterns observed in CDM\_11 layer-3 handlers ---
+high-entropy magic constants written to the stack at function entry,
+multiplicative-hash state-advance instructions, branchless
+\texttt{cmovae} cascades, \texttt{0xaaaaaaaa} poison fills --- match
+the textbook signature of \emph{mixed-boolean-arithmetic} (MBA)
+obfuscation as treated in the academic
+literature~\cite{eyrolles-mba, biondi-mba}. MBA obfuscation
+transforms an arithmetic operation into an equivalent expression
+that mixes bitwise and arithmetic operations in a way that defeats
+algebraic simplification on the obfuscated form. It is widely used
+in commercial software protection products (VMProtect, Themida,
+Arxan) and in custom obfuscators built by vendors for specific
+defensive use cases.
+
+A distinct but related technique, \emph{whitebox cryptography},
+embeds cryptographic key material into table-based representations
+that resist direct extraction even when the attacker has full read
+access to the obfuscated code~\cite{chow-aes-whitebox, lepoint-whitebox}.
+Commercial DRM products use whitebox-AES variants extensively;
+the encrypted keys in a Widevine L3 license are unwrapped by
+exactly such a routine before being applied to the per-frame
+decryption.
+
+The pattern we report in Section~\ref{sec:obfuscation} ---
+obfuscation concentrated at the depth where structured attacker
+data begins to be parsed --- is consistent with the design
+prescription of the whitebox literature: protect the cryptographic
+processor, not the dispatch glue around it. Whether the protection
+\emph{succeeds} against a determined attacker is a separate
+question we do not address.
+
+\subsection{Tooling antecedents}
+\label{sec:ante-tools}
+
+Three concrete pieces of tooling that this work relies on deserve
+acknowledgement:
+
+\textbf{Capstone}~\cite{capstone-tool}, the multi-architecture
+disassembly framework used by every script in this release that
+walks \texttt{widevinecdm.dll}'s \texttt{.text} section.
+
+\textbf{pefile}~\cite{pefile-tool}, the pure-Python PE parser used
+to enumerate exports, walk the section table, and read RVAs from
+\texttt{.rdata}.
+
+\textbf{mingw-w64}, the Windows cross-toolchain used to build the
+shim and the helpers from a Linux host. Notably, mingw-w64's
+gcc backend does not support Microsoft's structured exception
+handling \texttt{\_\_try / \_\_except}, which forced us to use
+\texttt{VirtualQuery}-based safety checks for the shim's
+register-target read paths instead of SEH-protected
+\texttt{memcpy}. This is the kind of small implementation detail
+that doesn't appear in glossy DRM-research literature but determines
+whether the methodology runs at all.
+
+% =============================================================================
+\section{Background}
+\label{sec:background}
+
+This section reviews the major technical components of the
+Windows L1 Widevine playback pipeline in greater depth than the
+introduction permitted.
+
+\subsection{Widevine licensing levels}
+\label{sec:bg-levels}
+
+Widevine defines three nested security levels.
+
+\textbf{L3} is a pure-software CDM. Cryptographic state is held in
+process memory inside an obfuscated runtime. Content keys are
+unwrapped by a whitebox-style cryptographic core and applied to
+ciphertext segments in user-space buffers. Decrypted output is
+returned to the host through standard memory. Per the published
+Widevine licensing policy, L3-only clients top out at 540p; content
+owners' deals frequently restrict L3 to lower bitrates than L2/L1
+clients receive.
+
+\textbf{L2} is a hybrid: a software CDM holds at least its
+sensitive operations behind a hardware-backed Trusted Execution
+Environment (TEE) on the host. L2 sees limited deployment on
+desktop.
+
+\textbf{L1}, the variant studied in this paper, requires the host
+to provide a hardware-backed protected media pipeline. On Windows
+the relevant pipeline is Protected Media Path (PMP), itself a
+composite of:
+
+\begin{itemize}[itemsep=0pt,topsep=2pt]
+  \item \texttt{peauth.sys}, the Microsoft-signed kernel-mode
+        component that enforces the OPM contract between the CDM
+        and the GPU driver,
+  \item the Media Foundation \texttt{IDirectXVideoDecoder} chain
+        running in a kernel-protected mode,
+  \item the DXGI protected-surface allocator that exposes the
+        decoded frame only to the GPU presentation pipeline and not
+        to user-space readback.
+\end{itemize}
+
+Under L1 hardware decode, the decrypted frame never appears in
+user-mode browser process memory. This is the design property that
+the paper's first empirical finding (Section~\ref{sec:findings-dormancy})
+exploits to demonstrate the CDM dormancy phenomenon.
+
+\subsection{Encrypted Media Extensions and the dispatch path}
+\label{sec:bg-eme}
+
+The W3C Encrypted Media Extensions specification~\cite{w3c-eme}
+defines the JavaScript API by which a web application requests
+DRM-mediated playback of an encrypted media stream. From the host
+browser's point of view, the relevant operations are:
+
+\begin{enumerate}[itemsep=2pt,topsep=2pt]
+  \item \texttt{navigator.requestMediaKeySystemAccess(}
+        \texttt{``com.widevine.alpha''}\texttt{)}: confirm that the
+        client has a CDM for the named key system.
+  \item Create a \texttt{MediaKeys} object and bind it to an
+        \texttt{HTMLMediaElement}.
+  \item Wait for the \texttt{encrypted} event, which provides the
+        Common Encryption (CENC) initialisation data extracted from
+        the media stream.
+  \item Create a \texttt{MediaKeySession} and call
+        \texttt{generateRequest(initDataType, initData)}, which
+        causes the CDM to construct a license request.
+  \item Forward the resulting message to the licensing server,
+        receive the response, and feed it back via
+        \texttt{updateSession(licenseResponse)}.
+  \item Continue playback as the CDM unwraps content keys and
+        applies them to the encrypted media data.
+\end{enumerate}
+
+Chromium's implementation of this API routes each step through the
+browser process, the renderer, and the CDM utility process via Mojo
+IPC interfaces defined in
+\texttt{chromium/components/cdm}~\cite{chromium-cdm-mojo}. The
+relevant Mojo interface for our purposes is
+\texttt{media.mojom.ContentDecryptionModule}, whose request and
+response messages are essentially a serialised projection of the
+nineteen-method CDM\_11 C++ interface.
+
+\subsection{The CDM\_11 C++ interface}
+\label{sec:bg-cdm11}
+
+The interface CDM\_11 implements is defined in the Chromium tree at
+\texttt{media/cdm/api/content\_decryption\_module.h}. The class is
+a pure-virtual base \texttt{ContentDecryptionModule\_11} with the
+following nineteen entries, declared in this order:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+virtual void Initialize(...) = 0;
+virtual void GetStatusForPolicy(...) = 0;
+virtual void SetServerCertificate(...) = 0;
+virtual void CreateSessionAndGenerateRequest(...) = 0;
+virtual void LoadSession(...) = 0;
+virtual void UpdateSession(...) = 0;
+virtual void CloseSession(...) = 0;
+virtual void RemoveSession(...) = 0;
+virtual void TimerExpired(...) = 0;
+virtual Status Decrypt(...) = 0;
+virtual Status InitializeAudioDecoder(...) = 0;
+virtual Status InitializeVideoDecoder(...) = 0;
+virtual void DeinitializeDecoder(...) = 0;
+virtual void ResetDecoder(...) = 0;
+virtual Status DecryptAndDecodeFrame(...) = 0;
+virtual Status DecryptAndDecodeSamples(...) = 0;
+virtual void OnPlatformChallengeResponse(...) = 0;
+virtual void OnQueryOutputProtectionStatus(...) = 0;
+virtual void OnStorageId(...) = 0;
+\end{lstlisting}
+
+Each virtual call translates, under the Microsoft x64 calling
+convention, into a single indirect call through a function pointer
+loaded from the object's vtable. The vtable layout for a class with
+nineteen virtual functions and no base-class virtuals is a
+nineteen-entry contiguous array of code pointers; the per-call
+overhead from the host's perspective is one indirect load plus the
+CFG dispatcher cost.
+
+We adopt the convention of identifying CDM\_11 methods by their slot
+index throughout this paper. \texttt{Decrypt} is slot 9,
+\texttt{DecryptAndDecodeFrame} is slot 14, and so on.
+
+\subsection{Common Encryption (CENC) and PSSH}
+\label{sec:bg-cenc}
+
+The Widevine protocol carries its initialisation data inside a
+Protection-Specific System Header (PSSH) box, as standardised by
+ISO/IEC 23001-7 (Common Encryption for ISO Base Media File
+Format)~\cite{iso-cenc, w3c-pssh}. A PSSH box is structured:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+PSSHBox {
+    u32         size;              // big-endian
+    char[4]     type;              // "pssh"
+    u8          version;
+    u24         flags;
+    UUID(16B)   SystemID;          // Widevine SystemID
+                                   //  edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
+    if version > 0:
+        u32     KID_count;
+        UUID[KID_count] KIDs;
+    u32         data_size;
+    u8[data_size] data;
+}
+\end{lstlisting}
+
+The \texttt{data} field, for Widevine, contains a Protocol Buffers
+serialisation of a \texttt{WidevineCencHeader} message with a known
+schema. The \texttt{generateRequest} call passes the entire PSSH box
+to the CDM, which parses out the SystemID, the KIDs, and the
+protobuf-encoded header to construct a license request.
+
+This is the attacker-controllable structured input that the
+\texttt{CreateSessionAndGenerateRequest} slot (slot 3) ingests:
+a malicious DASH manifest or a malicious EME application can place
+arbitrary bytes inside the PSSH and pass them to the CDM with full
+control over both the box header fields and the protobuf payload.
+Parser vulnerabilities in the CDM's PSSH path are
+attacker-reachable from any compromised CDN that serves the DASH
+manifest, from any compromised JavaScript that drives the EME
+application, or from any MITM attacker who can rewrite the DASH
+manifest in transit.
+
+The two standard CENC encryption schemes that the CDM must support
+are \textbf{CENC-CTR} (AES-128 in Counter mode, with subsample
+descriptors that indicate which byte ranges of the encrypted track
+are protected) and \textbf{CBCS} (AES-128 in CBC mode with
+\emph{pattern} encryption: a 1-in-10 or 1-in-9 pattern of
+encrypted-skipped blocks designed to be tolerable to AVC/HEVC NALU
+boundaries). The CDM\_11 \texttt{InputBuffer\_2} structure carries
+both schemes and their subsample / pattern parameters per call.
+
+\subsection{Mojo IPC and the CDM utility process}
+\label{sec:bg-mojo}
+
+Chromium isolates the CDM in a dedicated utility process to confine
+the impact of CDM compromise. The utility process is spawned with
+the command line:
+
+\begin{lstlisting}[basicstyle=\ttfamily\tiny]
+chrome.exe --type=utility
+           --utility-sub-type=media.mojom.CdmServiceBroker
+           --lang=en-US --service-sandbox-type=cdm
+           --no-sandbox  (when CIG is disabled for research)
+           ...
+\end{lstlisting}
+
+Inside the utility, a Mojo interface implementation accepts the
+host's CDM requests and forwards them to a C++ class that owns a
+single \texttt{ContentDecryptionModule\_11} pointer. That pointer
+points at the object returned by
+\texttt{widevinecdm.dll!CreateCdmInstance(11, \ldots)} ---
+which is the object whose vtable we map in Section~\ref{sec:static}.
+
+\subsection{Control Flow Guard and Code Integrity Guard}
+\label{sec:bg-cfg-cig}
+
+Two Windows process-level mitigations are relevant to the runtime
+instrumentation of the CDM utility:
+
+\textbf{Code Integrity Guard (CIG)} is the process mitigation
+policy \texttt{PROCESS\_CREATION\_MITIGATION\_POLICY\_BLOCK\_NON\_\\MICROSOFT\_BINARIES\_ALWAYS\_ON}.
+When enabled, the kernel refuses to load any DLL into the process
+that is not signed by Microsoft or a Microsoft partner. Chrome
+enables CIG on its renderer and utility processes by default since
+Chrome 70~\cite{chromium-cig}. The flag
+\texttt{--disable-features=RendererCodeIntegrity}, in combination
+with \texttt{--no-sandbox} on the affected processes, disables CIG
+for research use.
+
+\textbf{Control Flow Guard (CFG)} is a Microsoft compiler-level
+mitigation that adds a kernel-validated bitmap of valid indirect-call
+targets to the running process and inserts a check before each
+indirect call~\cite{microsoft-cfg}. A patched vtable that points
+at a hook function we just allocated is not in the bitmap by
+default, so the first call through the patched slot triggers a CFG
+failure that terminates the process.
+
+The supported way to mark a new function as a valid call target is
+the \texttt{SetProcessValidCallTargets} API
+\cite{ms-spvct-docs}. The API takes a process handle, a 4~KB-aligned
+page base, a page size, and an array of \texttt{CFG\_CALL\_TARGET\_INFO}
+descriptors whose \texttt{Offset} field is the \emph{in-page offset}
+(low 12 bits) of the target. An early version of our injector used
+the low 16 bits, which is wrong, the page-allocation backing the
+hook is 4~KB and the bitmap is indexed at 16-byte granularity within
+the page. The released injector uses the correct mask:
+
+\begin{lstlisting}[language=C, basicstyle=\ttfamily\scriptsize]
+CFG_CALL_TARGET_INFO cti;
+cti.Offset = (DWORD)(hookVA & 0xfff);   /* in-page offset */
+cti.Flags  = CFG_CALL_TARGET_VALID;
+DWORD_PTR pageBase = hookVA & ~0xfffULL;
+SetProcessValidCallTargets(hProc, (PVOID)pageBase,
+                            0x1000, 1, &cti);
+\end{lstlisting}
+
+\subsection{ASLR and the shared DLL view}
+\label{sec:bg-aslr}
+
+A practical implementation detail of significance to our cross-tab
+experiment (Section~\ref{sec:findings-cross}): Chrome's utility
+processes load \texttt{widevinecdm.dll} from the same on-disk image
+each time, and Windows' image-section sharing means that two
+separate utility processes both end up with the DLL mapped at the
+\emph{same virtual address}. This is why our injector's hook
+addresses (in the shim's image, at the shim's reserved load base)
+were identical between Netflix's CDM utility process and Bitmovin's
+CDM utility process. The data section of the DLL is, however,
+copy-on-write per process; each utility has its own counters and
+its own opened log file handle.
+
+% =============================================================================
+\section{Threat Model and Methodology}
+\label{sec:threat}
+
+\subsection{Threat model}
+\label{sec:threat-model}
+
+We consider an honest user of a Chromium-family browser playing
+hardware-decoded Widevine-protected content on Windows 11. The user
+has consented to research-grade instrumentation of their own browser
+and has installed our reverse-engineering tools on their own
+laboratory machine. The browser executable is unmodified and signed
+by the vendor. The Widevine CDM is the vendor-shipped
+\texttt{widevinecdm.dll} of the installed browser version. The user
+holds a valid, paid subscription to the commercial streaming
+service used in the empirical sections of the paper, and the use
+of that subscription is for personal viewing during the research
+window. No second user, no jurisdiction outside the user's own, and
+no third-party content are involved.
+
+We deliberately exclude from this study any threat model in which
+an attacker captures decrypted frames. Our concern is not the
+exploitation potential of the CDM but its architectural shape and
+the attack surface it presents to the host browser and to the
+network attacker positioned between the browser and the streaming
+CDN.
+
+\subsection{Methodology invariants}
+\label{sec:threat-invariants}
+
+We follow what we describe as the \emph{Buchanan model} of DRM
+research, summarised earlier (Section~\ref{sec:ante-buchanan}). The
+working version of the model that governed every experimental
+decision in this paper is:
+
+\begin{enumerate}[itemsep=2pt,topsep=2pt]
+  \item \textbf{Shape-only observation.} Any runtime hook is
+        permitted to log dispatch metadata --- slot number,
+        timestamp, register value hashes, structure-size fields ---
+        but is forbidden from copying any pointer-target bytes
+        belonging to ciphertext, decrypted frames, content key
+        material, or initialisation vectors into any persistent
+        storage or any out-of-process channel. The shim source
+        encodes this invariant explicitly: there is no code path
+        that calls \texttt{memcpy(\&log\_buf, ib.data, \dots)};
+        the shape extractor reads only the \texttt{size} fields,
+        an FNV-1a-32 hash of the first 16 bytes of \texttt{key\_id},
+        a non-zero presence flag for the IV, and a handful of public
+        scalar fields.
+  \item \textbf{Provable absence.} After every experiment we
+        forensically verify that the storage produced is pure ASCII
+        JSON consisting only of the permitted metadata fields and
+        contains no binary blobs, no decoded content, and no key
+        material. We document the verification procedure in
+        Section~\ref{sec:ethics} and provide the verifier script
+        in the released methodology.
+  \item \textbf{Reversible mutation.} All runtime modifications to
+        the target process (vtable patches, hook installations, CFG
+        bitmap registrations) are reversible. We save the
+        pre-patch state on the wire to the released tooling and
+        restore the target to its original state before publishing.
+        The released helper retains the original outer-vtable
+        thunk addresses in the shim's
+        \texttt{g\_pOrigSlot[19]} array so that an external observer
+        can validate that the post-experiment state is byte-equal
+        to the pre-experiment state.
+  \item \textbf{No content circumvention surface.} We use the
+        operator's own browser session to a commercial streaming
+        service to confirm what the CDM does during steady state,
+        but we never instrument the decoder, the kernel-side PMP
+        component (\texttt{peauth.sys}), the protected surface, or
+        any other component positioned to materialise a decrypted
+        frame. The shape-only shim is the deepest hook in the
+        stack we install.
+  \item \textbf{Falsification before publication.} Every empirical
+        claim is subjected to a falsification test: an alternative
+        hypothesis that, if true, would invalidate the claim, is
+        constructed and tested with whatever evidence the methodology
+        can produce. Section~\ref{sec:robustness} reports the
+        falsification sprint.
+\end{enumerate}
+
+A natural-language consequence of these invariants is that our
+results characterise the CDM's \emph{dispatch behaviour}, not its
+\emph{cryptographic state}. We can report how often a slot fires
+during real playback, what register-tuple distribution it sees,
+what the shape of its incoming buffer descriptor is. We cannot
+and do not report any byte of decoded content.
+
+% =============================================================================
+\section{Static Reverse Engineering of CDM\_11}
+\label{sec:static}
+
+This section walks through the static reverse engineering of the
+CDM\_11 dispatch in \texttt{widevinecdm.dll}, in the order that we
+performed it. Two binaries were analysed in parallel: \textbf{Chrome
+149.0.7827.115}, from its standard installation path
+under \texttt{WidevineCdm/\_platform\_specific/win\_x64/}
+($\sim$22~MB), and the same library as it ships in \textbf{Microsoft
+Edge 150} ($\sim$19~MB). All RVAs are with respect to the binary's
+image base.
+
+\subsection{Step 1: \texttt{CreateCdmInstance} and the version
+            switch}
+\label{sec:static-export}
+
+The \texttt{widevinecdm.dll} export table contains six entries; the
+only relevant one for our purposes is \texttt{CreateCdmInstance}:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+Edge 150     CreateCdmInstance @ rva 0x1d0850
+Chrome 149   CreateCdmInstance @ rva 0x1d2e10
+\end{lstlisting}
+
+Disassembling either entry shows a chain of small wrapper functions
+that load a version word into \texttt{ecx} (CDM interface version 9,
+10, or 11) and call a per-version constructor. The disassembly of
+the relevant fragment of Edge 150's \texttt{CreateCdmInstance} is:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+0x1801d0850: push   r14
+0x1801d0852: push   rsi
+0x1801d0853: push   rdi
+0x1801d0854: sub    rsp, 0x40
+0x1801d0858: mov    edi, ecx           ; ecx = requested version
+0x1801d085a: lea    rax, [rip + 0x...] ; load module-relative base
+...
+0x1801d0994: mov    ecx, 0xb           ; CDM_11 selected
+0x1801d0999: mov    rax, r9            ; arg setup
+...
+\end{lstlisting}
+
+Naively scanning the first \texttt{call} after each \texttt{mov ecx,
+0xb} returns the runtime's stack-check probe (\texttt{\_\_chkstk\_ms}
+or equivalent), not the actual constructor. A robust discoverer
+must filter known runtime helpers. The released
+\texttt{cdm\_arch\_discover.py} script uses a structural heuristic:
+enumerate all call targets reachable from \texttt{CreateCdmInstance},
+filter out targets called more than twice (the constructor is called
+exactly once per version branch; runtime helpers are called many
+times), and validate each candidate by inspecting whether its body
+contains a sequence of the form:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+  lea reg, [rip + N]      ; load a candidate vtable RVA
+  mov qword ptr [r?], reg ; install at offset 0 of `this`
+\end{lstlisting}
+
+\noindent and whether the loaded RVA points into \texttt{.rdata} at
+a location whose first nineteen QWORDs are all valid code pointers
+into \texttt{.text}. The first such candidate is reported as the
+CDM constructor and the loaded RVA as its outer vtable. The
+discoverer locates the outer vtable RVA in Edge 150 at
+\texttt{0x780250} on this path; the Chrome 149 outer vtable at
+\texttt{0x768fa0}.
+
+\subsection{Step 2: Co-shipped CDM versions}
+\label{sec:static-versions}
+
+A subsequent \emph{exhaustive} scan of \texttt{.rdata} for
+nineteen-slot structures matching the CDM thunk pattern (described
+below) reveals \textbf{two} such structures per binary, spaced
+\texttt{0xc0} bytes apart:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Binary} & \textbf{vtable A} & \textbf{vtable B} \\
+\midrule
+Edge 150    & \texttt{0x780190} & \texttt{0x780250} \\
+Chrome 149  & \texttt{0x768ee0} & \texttt{0x768fa0} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Within each binary, both vtables share their per-frame decrypt entry
+(slot 14 points to the same function in both A and B), but their
+\texttt{Initialize} entries differ:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Binary} & \textbf{vtable A.slot[0]} & \textbf{vtable B.slot[0]} \\
+\midrule
+Edge 150    & 0x1db330 & 0x1db390 \\
+Chrome 149  & 0x1e03c0 & 0x1e0420 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is consistent with the binary shipping both CDM\_10 and CDM\_11
+vtables in support of host browsers that have not yet upgraded to
+the newer interface, and matches the Chromium header history. In
+what follows we identify \emph{vtable B} as the CDM\_11 outer
+vtable, since runtime patches at \emph{vtable B}'s slot positions
+intercept the EME-host-facing dispatch
+(Section~\ref{sec:runtime}). The shared slot 14 implementation
+reflects the implementation choice to use one per-frame decrypt
+routine across both interface versions; the diverging slot 0
+reflects the version-specific \texttt{Initialize} signature.
+
+\subsection{Step 3: The outer vtable thunk pattern}
+\label{sec:static-thunk}
+
+The outer vtable contains nineteen entries. Most of them are
+\emph{thunks} of the form:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+slot N thunk @ rva 0x1dad00 + (N-3)*0x20:
+  mov rcx, qword ptr [rcx + 8]       ; this->m_impl
+  mov rax, qword ptr [rcx]           ; m_impl->m_vtable
+  mov rax, qword ptr [rax + 8*N]     ; slot N of m_impl_vtable
+  mov rdx, qword ptr [rip + cfg_disp]; CFG dispatcher pointer
+  jmp rdx                             ; CFG-protected tail-call
+\end{lstlisting}
+
+Each thunk is twenty-eight bytes followed by \texttt{int3} padding,
+laid out in a uniform \texttt{0x20}-spaced sequence in \texttt{.text}
+for slots 3 through 17. The slot 14 thunk in Edge 150, disassembled
+in full:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+0x1801dae60: mov    rcx, qword ptr [rcx + 8]
+0x1801dae64: mov    rax, qword ptr [rcx]
+0x1801dae67: mov    rax, qword ptr [rax + 0x70]
+0x1801dae6b: mov    rdx, qword ptr [rip + 0x10dcd2e]
+0x1801dae72: jmp    rdx
+0x1801dae74: int3
+0x1801dae75: int3
+... (int3 padding to 0x20 boundary)
+\end{lstlisting}
+
+We disassembled each thunk in both binaries and confirmed the
+slot-index check (the offset in \texttt{[rax + 8*N]} equals the slot
+number times eight) for fifteen of fifteen thunked slots in each
+binary. The byte-level confirmation is what licences our
+``slot~14 dormancy'' claim in Section~\ref{sec:findings-dormancy}:
+the runtime evidence
+($g\_callsBySlot[14] = 0$) is attributable to the
+correct method only because the slot index in the outer-vtable
+thunk dispatches to the correct inner method offset.
+
+Slots 0 (\texttt{Initialize}), 1 (\texttt{GetStatusForPolicy}), and
+18 (\texttt{OnStorageId}) are \emph{not} thunks; they are direct
+implementations placed in \texttt{.text} at non-contiguous
+addresses. Slot 2 (\texttt{SetServerCertificate}) is a thunk in both
+binaries but dispatches via \texttt{[rax + 8]} rather than
+\texttt{[rax + 0x10]} --- it shares an implementation with slot 1 at
+the \texttt{m\_impl} layer. This is a per-binary architectural
+detail consistent in both Edge 150 and Chrome 149, suggesting it
+is a deliberate implementation decision rather than a build
+accident.
+
+\subsection{Step 4: The \texttt{m\_impl} vtable}
+\label{sec:static-mimpl}
+
+The outer thunk dispatches into an \emph{intermediate} vtable owned
+by the \texttt{m\_impl} object that the outer class holds in
+\texttt{this->m\_impl} (\texttt{[outer + 8]}). Locating this
+intermediate vtable in \texttt{.rdata} is the second step of the
+static analysis.
+
+We use a known-signature pivot. From an earlier call-chain trace
+(documented in our research notes), we knew that the slot-5
+(\texttt{UpdateSession}) inner wrapper in Edge 150 sits at RVA
+\texttt{0x1d4ab0}, identifiable by its multi-push prologue with a
+stack canary that loads attacker-controlled data through a copy on
+its way to the obfuscated parser. The wrapper's code is unmistakable
+in a disassembly listing.
+
+To find the \texttt{m\_impl} vtable, we reverse-search \texttt{.rdata}
+for the QWORD value \texttt{image\_base + 0x1d4ab0}. There is
+exactly one occurrence. Backing up five eight-byte entries from the
+match gives the address of the \texttt{m\_impl} vtable: RVA
+\texttt{0x77d370} in Edge 150. All nineteen surrounding QWORDs
+point into \texttt{.text}, confirming the candidate. The same pivot
+applied to Chrome 149 (where the slot 5 inner wrapper sits at the
+analogous RVA) locates Chrome 149's \texttt{m\_impl} vtable at the
+corresponding offset.
+
+\subsection{Step 5: The \texttt{m\_impl} layer structure}
+\label{sec:static-layer2}
+
+Disassembling each entry of the \texttt{m\_impl} vtable reveals a
+mixture of three body types:
+
+\begin{enumerate}[itemsep=2pt,topsep=2pt]
+  \item \textbf{Clean MSVC wrappers} (slots 2, 3, 4, 5, 6, 7, 18).
+        These have a standard prologue (multiple
+        \texttt{push}~callee-saves, \texttt{sub rsp, N}, stack
+        canary load), allocate or borrow input copies, perform
+        sanitisation, and then call into a deeper handler. These
+        are the slots that ingest variable-length
+        attacker-influenced data (session-id strings, response
+        payloads, init-data buffers). The slot 3 wrapper in Edge
+        150, abbreviated for the paper:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+0x1801d47d0: push   r15
+0x1801d47d2: push   r14
+0x1801d47d4: push   r13
+0x1801d47d6: push   r12
+0x1801d47d8: push   rsi
+0x1801d47d9: push   rdi
+0x1801d47da: push   rbx
+0x1801d47db: sub    rsp, 0x50
+0x1801d47df: mov    esi, r9d            ; init_data_type
+0x1801d47e2: mov    edi, r8d            ; session_type
+0x1801d47e5: mov    ebx, edx            ; promise_id
+0x1801d47e7: mov    eax, [rsp + 0xb8]   ; init_data_size
+0x1801d47ee: mov    rdx, [rip + 0x10f284b]
+0x1801d47f5: xor    rdx, rsp            ; stack canary
+0x1801d47f8: mov    [rsp + 0x48], rdx
+0x1801d47fd: mov    r14, [rcx + 0x10]   ; load m_impl-internal
+0x1801d4801: xorps  xmm0, xmm0
+0x1801d4804: movaps [rsp + 0x30], xmm0
+...
+0x1801d4821: mov    rcx, r12
+0x1801d4824: call   0x180736080         ; malloc/__chkstk
+0x1801d4829: mov    [rsp + 0x30], rax
+0x1801d482e: lea    r13, [rax + r12]    ; end pointer
+...
+0x1801d485f: call   0x18021f200         ; LAYER-3 ENTRY
+                                        ; (obfuscated parser)
+\end{lstlisting}
+
+  \item \textbf{Double-trampolines} (slots 0, 1, 8, 9, 11--17).
+        Two-instruction bodies of the form
+        \texttt{mov rcx, [rcx + N]} followed by \texttt{jmp <addr>}
+        which forward the call to a deeper-layer handler without
+        intermediate processing. The slot 14 \texttt{m\_impl}
+        entry in Edge 150:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+0x1801d4f10: mov    rcx, qword ptr [rcx + 0x10]
+0x1801d4f14: jmp    0x180230c20    ; layer-3 handler (obfuscated)
+\end{lstlisting}
+
+  \item \textbf{Stubs} (slot 10). A two-instruction body
+        \texttt{mov eax, 3 ; ret} that returns a constant error
+        code without any further work. Slot 10 is
+        \texttt{InitializeAudioDecoder}; on the L1 Windows build it
+        is intentionally a no-op because audio decoding is handled
+        by the Media Foundation pipeline outside the CDM.
+\end{enumerate}
+
+\noindent The \texttt{m\_impl} vtable, in other words, is mostly a
+\emph{routing} layer; the actual work happens one indirection
+further.
+
+\subsection{Step 6: The three-layer dispatch model}
+\label{sec:static-3layer}
+
+Composing the previous five steps, the dispatch chain from a host
+virtual call to a per-slot handler is shown in
+Figure~\ref{fig:3layer}. Each public virtual call traverses three
+indirections before reaching the function that performs work.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[node distance=0.55cm]
+  \node[cdmbox, fill=gray!10, minimum width=10cm] (host) {Chromium media/cdm host (renderer)};
+  \node[layerbox, fill=blue!10, below=of host] (l1) {%
+    \textbf{Layer 1: \texttt{outer\_vtable} @ \texttt{.rdata + 0x780250}}\\[2pt]
+    \scriptsize 17 thunks $+$ 3 direct impls.
+    Thunk: \texttt{mov rcx,[rcx+8]; mov rax,[rcx]; mov rax,[rax+8N]; jmp [CFG]}};
+  \node[layerbox, fill=green!10, below=of l1] (l2) {%
+    \textbf{Layer 2: \texttt{m\_impl} vtable @ \texttt{.rdata + 0x77d370}}\\[2pt]
+    \scriptsize 7 clean MSVC wrappers (slots 2--7, 18) $+$
+    11 double-trampolines (slots 0, 1, 8, 9, 11--17) $+$ 1 stub (slot 10).};
+  \node[layerbox, fill=red!12, below=of l2] (l3) {%
+    \textbf{Layer 3: per-slot handlers (scattered across \texttt{.text})}\\[2pt]
+    \scriptsize Where parsing, cryptographic processing, and state-machine work happen.
+    MBA-style obfuscation concentrated on slots that parse attacker-controllable input.};
+  \draw[fatarrow] (host.south) -- node[right,font=\scriptsize,xshift=2pt] {virtual call via CDM\_11 interface} (l1.north);
+  \draw[fatarrow] (l1.south) -- node[right,font=\scriptsize,xshift=2pt] {slot $N \cdot 8$ dispatch} (l2.north);
+  \draw[fatarrow] (l2.south) -- node[right,font=\scriptsize,xshift=2pt] {trampoline target / wrapper call} (l3.north);
+\end{tikzpicture}%
+}%
+\caption{The three-layer CDM\_11 dispatch model. Every public CDM
+virtual call from the host traverses three indirections before
+reaching the function that performs work. RVAs shown are from
+Edge 150 \texttt{widevinecdm.dll}; Chrome 149 has the same
+structure at correspondingly different RVAs (see
+Section~\ref{sec:cross}).}
+\label{fig:3layer}
+\end{figure}
+
+\subsection{A note on the false starts}
+\label{sec:static-false}
+
+For the benefit of follow-on researchers, the static analysis as we
+actually performed it included two substantial false starts.
+
+The first false start was the identification of an internal
+singleton dispatch table at \texttt{.data + 0x1588b48} as the
+``CDM\_11 outer vtable.'' That table, in fact, is a separate
+nineteen-slot internal dispatch surface inside the Widevine library
+that is not the public EME interface. Our initial conclusion that
+``the CDM\_11 outer vtable's per-frame slot fires
+$\sim$600 times per second under steady-state Netflix HW playback''
+was incorrect: it was the internal singleton's slot 0 that fired
+600 times per second, and the actual outer-vtable per-frame slot
+was at zero. The correction came from a constructor-trace pivot
+that located the actual outer vtable via the
+\texttt{CreateCdmInstance} export, after which the dormancy finding
+became correctly attributable to the user-facing surface.
+
+The second false start was the original attribution of MBA-style
+obfuscation to the \texttt{m\_impl} layer. The \texttt{m\_impl}
+layer is in fact a clean routing layer (per
+Section~\ref{sec:static-layer2}); the obfuscation lives at layer
+three. A layer-by-layer enumeration of all nineteen slots,
+documented in our research notes 13b and 13c, located the
+obfuscation at its actual depth.
+
+We highlight these false starts because they are typical of static
+RE work on closed binaries with internal dispatch indirections.
+A single-pass reading of the binary's call graph would naturally
+have settled on either the wrong vtable or the wrong layer, and
+the falsification sprint of Section~\ref{sec:robustness} is what
+caught both.
+
+% =============================================================================
+\section{Runtime Instrumentation}
+\label{sec:runtime}
+
+The static map of the previous section yields hypotheses about which
+slots are reached during steady-state playback and which are not.
+To verify those hypotheses we instrument the running CDM utility
+process with a shape-only hook.
+
+\subsection{Code Integrity Guard (CIG) and the launch flag}
+\label{sec:runtime-cig}
+
+Chrome enables Code Integrity Guard
+(\texttt{PROCESS\_CREATION\_MITIGATION\_POLICY\_BLOCK\_NON\_\\MICROSOFT\_BINARIES\_ALWAYS\_ON})
+on its utility processes since Chrome 70~\cite{chromium-cig}. CIG
+denies any \texttt{LoadLibrary} of a non-Microsoft-signed image at
+the kernel level, so a vanilla \texttt{CreateRemoteThread(LoadLibraryA)}
+injection of our shim fails at the \texttt{LdrLoadDll} stage with
+\texttt{STATUS\_DYNAMIC\_CODE\_BLOCKED} (0xC0000605).
+
+For lab-research use, Chrome can be launched with the flags
+\texttt{--disable-features=}\linebreak[1]\texttt{RendererCodeIntegrity}
+and \texttt{--no-sandbox}, which together disable CIG on the
+utility processes.
+This produces a controlled research target without changing the
+CDM library or the host browser binary, and corresponds to the
+equivalent reachability assumption that an attacker with
+code-execution in the renderer would have to satisfy separately
+(via, for example, an arbitrary-write that targets the renderer's
+JIT or a process-load chain that bypasses CIG).
+
+\subsection{Control Flow Guard bitmap registration}
+\label{sec:runtime-cfg}
+
+CIG-disabled does not disable Control Flow Guard (CFG): once the
+shim is loaded, simply patching a vtable entry to point at an
+unregistered hook function causes the CFG dispatcher to abort the
+call as a control-flow violation. The released installer uses
+\texttt{SetProcessValidCallTargets} to mark each hook target as a
+valid call target before patching its slot. Figure~\ref{fig:hookinstall}
+sketches the install flow.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=0.55cm and 0.7cm, font=\small]
+  \node[cdmbox, fill=blue!10, minimum width=4.5cm] (s1) {\textbf{1.} Launch Chrome with\\\scriptsize \texttt{--disable-features=}\\\scriptsize \texttt{RendererCodeIntegrity --no-sandbox}};
+  \node[cdmbox, fill=blue!10, below=of s1, minimum width=4.5cm] (s2) {\textbf{2.} CDM utility process spawns,\\\scriptsize loads \texttt{widevinecdm.dll}};
+  \node[cdmbox, fill=orange!15, below=of s2, minimum width=4.5cm] (s3) {\textbf{3.} \texttt{CreateRemoteThread(LoadLibraryA)}\\\scriptsize injects \texttt{wv\_shim.dll} into utility};
+  \node[cdmbox, fill=red!15, below=of s3, minimum width=4.5cm] (s4) {\textbf{4.} For each slot N to hook:\\\scriptsize Read \texttt{outer\_vtable[N]} \(\rightarrow\) save to \texttt{g\_pOrigSlot[N]}};
+  \node[cdmbox, fill=red!15, below=of s4, minimum width=4.5cm] (s5) {\textbf{5.} \texttt{SetProcessValidCallTargets(}\\\scriptsize \texttt{ page\_base, page\_size, hook\_va \& 0xfff, VALID)}\\\scriptsize Register \texttt{WvHookSlotN} as CFG-valid};
+  \node[cdmbox, fill=green!15, below=of s5, minimum width=4.5cm] (s6) {\textbf{6.} \texttt{VirtualProtectEx + WriteProcessMemory}\\\scriptsize Patch \texttt{outer\_vtable[N] = WvHookSlotN}};
+  \node[cdmbox, fill=green!15, below=of s6, minimum width=4.5cm] (s7) {\textbf{7.} Hook fires on next CDM virtual call.\\\scriptsize Shim logs shape, calls original via \texttt{g\_pOrigSlot[N]}};
+  \foreach \a/\b in {s1/s2, s2/s3, s3/s4, s4/s5, s5/s6, s6/s7}
+    \draw[fatarrow] (\a) -- (\b);
+\end{tikzpicture}
+\caption{Hook installation sequence. Step~5 (CFG bitmap registration)
+is what catches researchers most often --- the \texttt{Offset} field of
+\texttt{CFG\_CALL\_TARGET\_INFO} expects an in-page offset (low 12
+bits) of the hook target, not an absolute address or a different
+mask. Step~4 captures the design subtlety that motivated the
+per-slot back-pointer array (\S\ref{sec:runtime-orig}).}
+\label{fig:hookinstall}
+\end{figure}
+
+\subsection{Shape-only shim design}
+\label{sec:runtime-shape}
+
+The shim, \texttt{wv\_shim.dll}, exports nineteen per-slot hook
+functions \texttt{WvHookSlot0} through \texttt{WvHookSlot18}, each
+with its own original-pointer slot in an exported
+\texttt{g\_pOrigSlot[19]} array, and a single
+\texttt{g\_callsBySlot[19]} counter array. Each hook function:
+
+\begin{enumerate}[itemsep=2pt,topsep=2pt]
+  \item Atomically increments its slot counter and the aggregate
+        \texttt{g\_calls}.
+  \item Calls the original via \texttt{g\_pOrigSlot[N]} with the
+        unmodified register tuple.
+  \item For slots 9, 14, 15 (which take an \texttt{InputBuffer\_2*}
+        argument in \texttt{rdx}), tries to read the buffer's
+        \emph{shape} via the safe-copy primitive described below
+        and writes a single JSONL line with
+        \texttt{encryption\_scheme}, \texttt{data\_size},
+        \texttt{key\_id\_size}, \texttt{iv\_size}, an FNV-1a-32 hash
+        of the first 16 bytes of \texttt{key\_id}, an
+        \texttt{iv\_has\_nonzero} bit, \texttt{num\_subsamples},
+        \texttt{pattern\_crypt}, \texttt{pattern\_skip}, and the
+        media \texttt{timestamp}.
+  \item For other slots, writes a \texttt{generic} event with an
+        FNV-1a-32 hash of the four argument registers.
+\end{enumerate}
+
+\noindent No byte of \texttt{ib.data} (the ciphertext) is ever read,
+either transiently or persistently; \texttt{ib.key\_id} and
+\texttt{ib.iv} are read into a stack-local buffer that is collapsed
+into a hash and then immediately discarded. The shim source enforces
+this by simply not having a code path that copies any of those
+fields into a logging structure.
+
+The safe-copy primitive uses \texttt{VirtualQuery} to confirm that
+each source page is committed and readable before copying, since
+\texttt{mingw-w64}'s C compiler does not provide Microsoft
+SEH \texttt{\_\_try / \_\_except} on x86\_64. The check walks every
+page in the source range, confirms \texttt{MEM\_COMMIT} state, and
+confirms one of the read-permitted page protections
+(\texttt{PAGE\_READONLY}, \texttt{PAGE\_READWRITE},
+\texttt{PAGE\_EXECUTE\_READ}, etc.) before \texttt{memcpy}.
+
+\subsection{Per-slot original-pointer chain}
+\label{sec:runtime-orig}
+
+A design subtlety worth noting: the first version of the shim used
+a single \texttt{g\_pOrigDecrypt} variable for all hooked slots.
+Patching multiple slots with that single back-pointer led to
+signature-mismatch crashes the moment the second-patched slot fired
+(the back-pointer held the previous slot's original). The released
+shim uses a per-slot array. More subtly still, when we hook the
+\emph{outer} vtable rather than an internal singleton table, the
+back-pointer must hold the outer thunk address, \emph{not} an
+internal dispatch-table address; otherwise the original-call path
+ends up jumping into the wrong inner function and silently corrupts
+the call. Our installer (\texttt{wv\_helper3.c}) reads the
+outer-vtable original at the moment of patch and stores it into
+\texttt{g\_pOrigSlot[N]} as part of the same atomic operation:
+
+\begin{lstlisting}[language=C, basicstyle=\ttfamily\scriptsize]
+DWORD_PTR origFn = 0;
+ReadProcessMemory(hp, (LPCVOID)slotAddr, &origFn, 8, NULL);
+
+/* CFG: register hook as valid target */
+CFG_CALL_TARGET_INFO cti = { hookVA & 0xfff,
+                              CFG_CALL_TARGET_VALID };
+SetProcessValidCallTargets(hp, (PVOID)(hookVA & ~0xfffULL),
+                            0x1000, 1, &cti);
+
+/* Save outer thunk address into g_pOrigSlot[N] */
+WriteProcessMemory(hp,
+    (LPVOID)(gOrigSlotRemote + N*8),
+    &origFn, 8, NULL);
+
+/* Patch outer_vtable[N] -> hook */
+DWORD oldProt = 0;
+VirtualProtectEx(hp, (LPVOID)slotAddr, 8,
+                  PAGE_READWRITE, &oldProt);
+WriteProcessMemory(hp, (LPVOID)slotAddr, &hookVA, 8, NULL);
+VirtualProtectEx(hp, (LPVOID)slotAddr, 8, oldProt, &oldProt);
+\end{lstlisting}
+
+% =============================================================================
+\section{Empirical Findings}
+\label{sec:findings}
+
+We report four findings, each anchored to a recorded experimental
+run. All runs used Chrome 149.0.7827.115 on Windows 11 26100 with
+NVIDIA hardware-secure decoder available. No CDM utility process
+ever crashed during the runs that produced the data reported here.
+
+\subsection{Hardware-decode dormancy on the user-facing surface}
+\label{sec:findings-dormancy}
+
+\textbf{Hypothesis.} Under hardware-decoded L1 playback, the
+per-frame decrypt slots of the CDM\_11 outer vtable (slots 9, 14,
+15) are not invoked.
+
+\textbf{Procedure.} Chrome was launched with
+\texttt{--disable-features=RendererCodeIntegrity --no-sandbox}. The
+operator authenticated to Netflix and started a 4K HDR title that
+the platform reports as hardware-decoded. After ninety seconds of
+steady-state playback we installed our shim into the CDM utility
+process and patched four outer-vtable slots simultaneously: slot 14
+(\texttt{DecryptAndDecodeFrame}), slot 15
+(\texttt{DecryptAndDecodeSamples}), slot 3
+(\texttt{CreateSessionAndGenerateRequest}, control), and the
+slot-14 outer thunk RVA. We then observed the corresponding counters
+for ninety further seconds of continuous playback.
+
+\textbf{Result.} All four counters remained at zero. Video continued
+to play normally throughout. Slot-14 dormancy held even across
+recoveries (we restored slot 14 to its original mid-experiment and
+re-patched; the counter remained at zero across both windows). The
+four-slot zero-fires-in-ninety-seconds result was reproducible
+3/3.
+
+\textbf{Interpretation.} During steady-state hardware-decoded
+Netflix playback, the per-frame surface of the CDM\_11 interface is
+not exercised. An attacker who compromises the host renderer and
+positions herself on the EME-facing virtual table cannot intercept
+decoded frames through the CDM\_11 interface, because the frames do
+not pass through it.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[node distance=0.45cm and 0.8cm]
+  \node[cdmbox, fill=purple!12, minimum width=4cm] (cdn) {Encrypted DASH/CMAF stream};
+  \node[cdmbox, fill=gray!10, below left=0.7cm and 0.3cm of cdn, minimum width=4cm] (sw_route) {SW decode path};
+  \node[cdmbox, fill=gray!10, below right=0.7cm and 0.3cm of cdn, minimum width=4cm] (hw_route) {HW decode path (L1)};
+  \node[cdmbox, fill=red!15, below=of sw_route, minimum width=4cm] (sw_cdm) {CDM\_11 \texttt{Decrypt} / \texttt{DecryptAndDecodeFrame}\\\scriptsize (would be invoked here)};
+  \node[cdmbox, fill=blue!10, below=of sw_cdm, minimum width=4cm] (sw_render) {Renderer in browser process};
+  \node[cdmbox, fill=red!10, dashed, below=of hw_route, minimum width=4cm] (hw_cdm) {CDM\_11 \texttt{DecryptAndDecodeFrame}\\\scriptsize \textbf{DORMANT} (\(g\_{}calls{=}0\))};
+  \node[cdmbox, fill=orange!15, below=of hw_cdm, minimum width=4cm] (mfpmp) {Media Foundation PMP\\\scriptsize \texttt{peauth.sys} / hardware decoder};
+  \node[cdmbox, fill=cyan!15, below=of mfpmp, minimum width=4cm] (gpu) {Protected GPU surface};
+  \draw[thinarrow] (cdn) -- (sw_route);
+  \draw[thinarrow] (cdn) -- (hw_route);
+  \draw[thinarrow] (sw_route) -- (sw_cdm);
+  \draw[thinarrow] (sw_cdm) -- (sw_render);
+  \draw[thinarrow] (hw_route) -- (hw_cdm);
+  \draw[thinarrow, dashed] (hw_cdm) -- node[right,font=\scriptsize] {bypass} (mfpmp);
+  \draw[thinarrow] (mfpmp) -- (gpu);
+  \draw[fatarrow, red, dashed] (hw_route.east) .. controls +(2,-1) and +(2,1) .. (mfpmp.east)
+    node[midway, right, font=\scriptsize, text=red, align=left] {per-frame\\bypass};
+\end{tikzpicture}%
+}%
+\caption{Hardware-decode dormancy. Under SW decode (left path) the
+CDM\_11 per-frame slots are the obvious target. Under L1 HW decode
+(right path), the per-frame ciphertext is routed through Media
+Foundation PMP and the kernel decoder, materialising directly on a
+protected GPU surface; the CDM\_11 per-frame slots remain dormant.}
+\label{fig:hwdormancy}
+\end{figure}
+
+\subsection{Internal singleton activity at $\sim$2.3k ops/s}
+\label{sec:findings-singleton}
+
+\textbf{Hypothesis.} Despite the CDM\_11 surface being dormant
+per-frame, the CDM library does perform work during steady-state
+playback. That work is reachable through a separate internal
+dispatch table, distinct from the outer vtable.
+
+\textbf{Procedure.} We patched slots 0--7 of the internal singleton
+table identified at \texttt{.data + 0x1588b48} in Chrome 149, then
+observed for $\sim$355 seconds of continuous Netflix playback.
+
+\textbf{Result.} The shim recorded \textbf{810{,}099 events} in a
+single JSONL log (in two consecutive captures). Distribution:
+
+\begin{center}\small
+\begin{tabular}{rrrr}
+\toprule
+\textbf{slot} & \textbf{count} & \textbf{unique \texttt{rh}} & \textbf{rate (ev/s)} \\
+\midrule
+0 & 395{,}580 & 16{,}338 & $\sim$1{,}114 \\
+2 &     20    &  2     & 0.06 \\
+6 & 414{,}459 & 1{,}379 & $\sim$1{,}167 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The aggregate rate is $\sim$2{,}281 events/sec on this
+internal table during steady-state HW playback.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.95\columnwidth,
+  height=4.2cm,
+  ybar,
+  bar width=10pt,
+  ylabel={Calls per second},
+  ylabel style={font=\small},
+  xlabel={Internal singleton slot index},
+  xlabel style={font=\small},
+  symbolic x coords={0,1,2,3,4,5,6,7},
+  xtick=data,
+  ymin=0, ymax=1300,
+  ymajorgrids,
+  grid style=dashed,
+  nodes near coords,
+  nodes near coords style={font=\tiny, /pgf/number format/.cd, fixed, precision=0},
+  enlarge x limits=0.08,
+  font=\footnotesize
+]
+\addplot[fill=red!30] coordinates {(0,1114) (1,0) (2,0.06) (3,0) (4,0) (5,0) (6,1167) (7,0)};
+\end{axis}
+\end{tikzpicture}
+\caption{Activity profile of the internal singleton dispatch table at
+\texttt{.data + 0x1588b48} during steady-state Netflix 4K HDR
+playback.}
+\label{fig:singleton-rate}
+\end{figure}
+
+\textbf{Interpretation.} The internal singleton dispatch is
+\emph{not} the user-facing CDM\_11 interface; the slot 0 firing rate
+is incompatible with \texttt{Initialize} semantics (which would be
+called once per session, not 600 times per second). Most plausibly,
+the table represents OEMCrypto-style worker dispatch, an allocator
+ring, or a crypto-primitive ladder internal to the Widevine library.
+Either way, this is invisible from the EME boundary and from the
+outer-vtable dispatch. Combined with the dormancy finding above,
+the picture is: \emph{the CDM library is doing constant
+cryptographic work during HW playback, but that work is hidden
+behind a different dispatch surface than the one Chrome's EME
+plumbing knows about}.
+
+\subsection{Reachability of session-management slots}
+\label{sec:findings-session}
+
+\textbf{Hypothesis.} Although the per-frame outer-vtable slots are
+dormant under HW decode, the session-management outer-vtable slots
+(\texttt{CreateSessionAndGenerateRequest} and
+\texttt{UpdateSession}) remain reachable and \emph{do} fire during
+normal session lifecycle events.
+
+\textbf{Procedure.} We patched outer-vtable slots 3 and 5 with
+correct per-slot back-pointers to their original thunk addresses
+(Section~\ref{sec:runtime-orig}). The operator performed a title
+switch in the running Netflix tab and we observed the
+\texttt{g\_callsBySlot} counters over the following minute.
+
+\textbf{Result.}
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+& \texttt{slot 3} & \texttt{slot 5} \\
+\midrule
+pre-action & 10 & 9 \\
+post-action & \textbf{13 (+3)} & \textbf{12 (+3)} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Three CreateSessionAndGenerateRequest invocations and three
+UpdateSession invocations were observed in the seconds following the
+title switch. The CDM utility process remained alive
+($\sim$85~MB working set), as expected given that the back-pointer
+held the correct thunk address.
+
+\textbf{Interpretation.} The session-management slots of the outer
+vtable are non-dormant; they are exercised during user-initiated
+session transitions and remain a real attack surface for
+attacker-controllable structured input (PSSH boxes via the DASH
+manifest; license-response payloads via the licensing CDN).
+
+\subsection{Cross-source consistency (Bitmovin)}
+\label{sec:findings-cross}
+
+\textbf{Hypothesis.} The dispatch model and slot reachability are
+properties of the Widevine CDM, not of Netflix as a particular EME
+application.
+
+\textbf{Procedure.} After the Netflix title switch above, the
+operator opened a separate tab in the same Chrome browser and loaded
+the public Bitmovin Widevine demo at
+\texttt{bitmovin.com/demos/drm}. Chrome spawned a \emph{second} CDM
+utility process to service that tab. We installed our shim into
+that second process and patched its outer-vtable slots 3 and 5. The
+operator reloaded the demo to force session re-creation.
+
+\textbf{Result.} Second CDM utility process counters:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+& \texttt{slot 3} & \texttt{slot 5} \\
+\midrule
+post-reload & \textbf{2} & \textbf{2} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[node distance=0.4cm and 0.5cm, font=\small]
+  \node[cdmbox, fill=gray!10, minimum width=10cm] (browser) {Single Chrome browser process (two tabs)};
+  \node[cdmbox, fill=blue!10, below left=0.5cm and -0.5cm of browser, minimum width=4cm] (nf) {Tab 1: Netflix\\\scriptsize (4K HDR HW playback)};
+  \node[cdmbox, fill=cyan!12, below right=0.5cm and -0.5cm of browser, minimum width=4cm] (bm) {Tab 2: Bitmovin demo\\\scriptsize (public Widevine sample)};
+  \node[cdmbox, fill=orange!15, below=of nf, minimum width=4cm] (u1) {CDM utility \texttt{pid=5772}\\\scriptsize \texttt{widevinecdm.dll @ 0x7ffc...}};
+  \node[cdmbox, fill=orange!15, below=of bm, minimum width=4cm] (u2) {CDM utility \texttt{pid=5048}\\\scriptsize \texttt{widevinecdm.dll @ 0x7ffc...}};
+  \node[cdmbox, fill=green!15, below=of u1, minimum width=4cm] (h1) {Outer vtable patched:\\\scriptsize slot 3 \(\rightarrow\) WvHookSlot3\\\scriptsize slot 5 \(\rightarrow\) WvHookSlot5};
+  \node[cdmbox, fill=green!15, below=of u2, minimum width=4cm] (h2) {Outer vtable patched:\\\scriptsize slot 3 \(\rightarrow\) WvHookSlot3\\\scriptsize slot 5 \(\rightarrow\) WvHookSlot5};
+  \node[cdmbox, fill=yellow!20, below=of h1, minimum width=4cm] (r1) {After title switch:\\\scriptsize \textbf{slot 3: +3 fires}\\\scriptsize \textbf{slot 5: +3 fires}};
+  \node[cdmbox, fill=yellow!20, below=of h2, minimum width=4cm] (r2) {After F5 + play:\\\scriptsize \textbf{slot 3: +2 fires}\\\scriptsize \textbf{slot 5: +2 fires}};
+  \draw[thinarrow] (browser.south) -- (nf.north);
+  \draw[thinarrow] (browser.south) -- (bm.north);
+  \draw[thinarrow] (nf) -- (u1);
+  \draw[thinarrow] (bm) -- (u2);
+  \draw[thinarrow] (u1) -- (h1);
+  \draw[thinarrow] (u2) -- (h2);
+  \draw[thinarrow] (h1) -- (r1);
+  \draw[thinarrow] (h2) -- (r2);
+\end{tikzpicture}%
+}%
+\caption{Cross-source experiment. Two tabs of the same Chrome
+browser play two distinct Widevine-protected sources, each one
+served by its own CDM utility process. Identical hooks confirm
+identical session-management slot reachability.}
+\label{fig:crosssource}
+\end{figure}
+
+\noindent Two CreateSessionAndGenerateRequest invocations and two
+UpdateSession invocations were observed. The dispatch model
+(outer-vtable thunk, m\_impl wrapper, layer-3 handler) is identical
+to what we observed in the Netflix-serving CDM utility process; the
+slot 3 and slot 5 hook code paths were exercised in the same
+sequence in both processes.
+
+\textbf{Interpretation.} The CDM\_11 dispatch model is a binary
+property of \texttt{widevinecdm.dll}, not a property of the EME
+application that uses it. An attacker positioned to influence the
+PSSH or license payload of \emph{any} Widevine-protected source
+will see the same dispatch and the same slot reachability as one
+positioned against Netflix.
+
+\subsection{Architectural side observation: separate CDM utilities}
+
+A secondary observation worth recording is that Chrome 149 spawned
+\emph{two} CDM utility processes when Netflix and Bitmovin were
+playing simultaneously in different tabs, not one shared utility.
+This is consistent with Chromium's per-origin isolation policy and
+implies that an attacker positioned to compromise one EME
+application's CDM cannot directly observe a second EME application's
+CDM via shared in-process state.
+
+% =============================================================================
+\section{The Obfuscation Distribution as a Defence Layer}
+\label{sec:obfuscation}
+
+The \texttt{widevinecdm.dll} binary contains numerous functions
+whose body matches the textbook signature of mixed-boolean-arithmetic
+(MBA) obfuscation: large stack-resident magic constants written
+immediately on entry; multiplicative-hash state-advance instructions
+of the form \texttt{imul edx, ecx, 0xK ; shr edx, 0xS ; cmp eax, 0xT
+; je state\_exit}; \texttt{cmovae} branchless dispatch cascades;
+\texttt{0xaaaaaaaa} or \texttt{0xaaaaaaaaaaaaaaaa} fill patterns
+acting as poison initialiser values for stack-local state. These
+patterns are not uniformly distributed across the slot space.
+
+\subsection{Visual layout}
+
+Figure~\ref{fig:obfuscation-grid} visualises the per-slot
+obfuscation status side by side with each slot's classification as
+an attacker-input slot or a passthrough slot.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[%
+  slotcell/.style={draw, minimum width=0.62cm, minimum height=0.55cm, font=\scriptsize, align=center, inner sep=1.5pt},
+  legendcell/.style={draw, minimum width=0.42cm, minimum height=0.42cm, inner sep=0pt},
+]
+  % Legend row at top
+  \begin{scope}[shift={(0, 1.55)}]
+    \node[font=\footnotesize, anchor=west] at (-7.0, 0) {Per-slot CDM\_11 obfuscation status:};
+    \node[legendcell, fill=red!30, anchor=west] at (-2.0, 0) {};
+    \node[font=\scriptsize, anchor=west] at (-1.4, 0) {obfuscated};
+    \node[legendcell, fill=orange!30, anchor=west] at (0.2, 0) {};
+    \node[font=\scriptsize, anchor=west] at (0.8, 0) {partial};
+    \node[legendcell, fill=green!25, anchor=west] at (2.0, 0) {};
+    \node[font=\scriptsize, anchor=west] at (2.6, 0) {clean};
+    \node[legendcell, fill=gray!20, anchor=west] at (3.8, 0) {};
+    \node[font=\scriptsize, anchor=west] at (4.4, 0) {tramp/stub};
+  \end{scope}
+
+  % Header letters (A/P) above the cells
+  \foreach \i/\inp in {
+    0/A, 1/A, 2/P, 3/A, 4/A, 5/A, 6/-, 7/-, 8/-, 9/A,
+    10/-, 11/-, 12/-, 13/-, 14/A, 15/A, 16/A, 17/-, 18/P}
+  {
+    \pgfmathsetmacro\xpos{\i*0.7 - 6.3}
+    \ifx\inpA
+      \node[font=\tiny] at (\xpos, 0.55) {\textbf{A}};
+    \else\ifx\inpP
+      \node[font=\tiny] at (\xpos, 0.55) {\textbf{P}};
+    \fi\fi
+  }
+
+  % Slot cells - single row, properly spaced
+  \foreach \i/\col in {
+    0/orange!30, 1/red!30, 2/green!25, 3/red!30, 4/gray!20,
+    5/red!30, 6/gray!20, 7/gray!20, 8/red!30, 9/red!30,
+    10/gray!20, 11/orange!30, 12/green!25, 13/green!25, 14/red!30,
+    15/green!25, 16/green!25, 17/green!25, 18/green!25}
+  {
+    \pgfmathsetmacro\xpos{\i*0.7 - 6.3}
+    \node[slotcell, fill=\col] at (\xpos, 0) {\textbf{\i}};
+  }
+
+  % Method names below, smaller and clearly separated
+  \foreach \i/\name in {
+    0/Init, 1/GetStat, 2/SetCert, 3/CreateSess, 4/LoadSess,
+    5/UpdateSess, 6/CloseSess, 7/RemoveSess, 8/TimerExp, 9/Decrypt,
+    10/InitAud, 11/InitVid, 12/DeinitDec, 13/ResetDec, 14/DecDecFr,
+    15/DecDecSm, 16/PlatChal, 17/QryOutP, 18/StoreId}
+  {
+    \pgfmathsetmacro\xpos{\i*0.7 - 6.3}
+    \node[font=\tiny, rotate=60, anchor=east] at (\xpos, -0.45) {\name};
+  }
+
+  % Footnote line at bottom
+  \node[font=\scriptsize, align=center, text width=12cm] at (0, -2.5) {%
+    \textbf{A} = attacker-input slot (parses structured data);\quad
+    \textbf{P} = passthrough (opaque blob the CDM forwards without parsing).};
+\end{tikzpicture}%
+}%
+\caption{Per-slot obfuscation status of CDM\_11. Red cells are slots
+whose layer-1 or layer-3 body matches the MBA-style obfuscation
+signature; orange cells are partial matches; green cells are clean
+across the dispatch chain; grey cells are layer-2 trampolines or
+stubs whose layer-3 handlers we report individually in
+Section~\ref{sec:obfuscation}.}
+\label{fig:obfuscation-grid}
+\end{figure}
+
+\subsection{Pattern}
+
+Slots that obviously pass an opaque, attacker-influenced \emph{blob}
+that the CDM forwards without parsing
+(\texttt{SetServerCertificate}, \texttt{OnStorageId}) are clean at
+every layer of the dispatch. Slots that begin parsing structured
+attacker-controllable data exhibit obfuscation, though at varying
+depths. The slot that takes a textual policy
+(\texttt{GetStatusForPolicy}) is obfuscated at layer 1, where the
+parsing begins. The slots that take large structured payloads
+(\texttt{CreateSessionAndGenerateRequest},
+\texttt{UpdateSession}) place the obfuscated processing one or two
+hops deeper, after a clean MSVC wrapper has copied the input into
+the CDM's own buffer and looked up the session. The slots involved
+in per-frame decode (\texttt{Decrypt},
+\texttt{DecryptAndDecodeFrame}) are obfuscated immediately at the
+double-trampoline target, where the cryptographic processor begins.
+
+This is the pattern we cautiously summarise as:
+
+\begin{quote}\itshape
+CDM\_11 protects each slot at the depth at which that slot begins
+to parse structured attacker data.
+\end{quote}
+
+\noindent It is an architectural observation, not a security claim:
+obfuscation is not security, and we are not assessing the strength
+of the protection, only its distribution.
+
+% =============================================================================
+\section{Cross-binary Stability}
+\label{sec:cross}
+
+The architectural model described in
+Section~\ref{sec:static-3layer} was developed on Edge 150
+\texttt{widevinecdm.dll}. We validated that the same model holds in
+Chrome 149 \texttt{widevinecdm.dll} by re-running the discoverer:
+
+\begin{center}\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Property} & \textbf{Edge 150} & \textbf{Chrome 149} \\
+\midrule
+CreateCdmInstance RVA          & 0x1d0850 & 0x1d2e10 \\
+CDM\_11 outer vtable RVA       & 0x780250 & 0x768fa0 \\
+CDM\_10 outer vtable RVA       & 0x780190 & 0x768ee0 \\
+Slot-index check (slots 3--17) & 15/15    & 15/15    \\
+Direct-impl slots              & 3 (0, 1, 18) & 3 (0, 1, 18) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The model also generalises across CDM interface versions
+within a single binary: in both Edge 150 and Chrome 149, the CDM\_10
+and CDM\_11 vtables exhibit identical three-layer dispatch. Their
+per-frame decrypt handler is the same physical function; their
+\texttt{Initialize} handlers diverge. This is consistent with the
+binary providing both interface versions for backward compatibility
+with older host browsers, and the CDM author choosing to share the
+implementation of the version-stable methods between the two.
+
+The cross-binary slot table appears as Appendix~\ref{app:slot-table}.
+
+% =============================================================================
+\section{Robustness Testing}
+\label{sec:robustness}
+
+Before publishing any claim made above, we ran a falsification
+sprint against the strongest empirical findings. The sprint
+included:
+
+\begin{enumerate}[itemsep=2pt,topsep=2pt]
+  \item \textbf{Slot-index correctness.} The outer-vtable slot 14
+        thunk is byte-confirmed to dispatch at offset \texttt{0x70}
+        ($= 14 \cdot 8$) in the \texttt{m\_impl} vtable.
+  \item \textbf{Shape-data signal vs noise.} The 810k-event capture
+        was analysed for register-hash entropy and timing
+        distribution. Hash entropy for the two hot slots was 16{,}338
+        and 1{,}379 unique values across 395{,}580 and 414{,}459
+        invocations respectively; the rate was steady across the
+        observation window at $\sim$2.3k events/s.
+  \item \textbf{Layer-3 enumeration.} All nineteen layer-3 handlers
+        were located via either the trampoline jump target or the
+        wrapper's first non-stack-check call and were classified for
+        obfuscation status. The first version of the obfuscation
+        claim, which placed obfuscation at the \texttt{m\_impl}
+        layer, was found to be incorrect; the obfuscation is one
+        further hop deeper, and the claim was rewritten accordingly.
+  \item \textbf{Cross-binary identity.} The discoverer was rerun
+        against Chrome 149's \texttt{widevinecdm.dll}. The outer
+        vtable, slot-index mapping, and per-slot CDM\_11 method
+        identification matched the Edge 150 analysis.
+  \item \textbf{Cross-source identity.} The outer-vtable
+        instrumentation was deployed against the second CDM utility
+        spawned for a non-Netflix Widevine source (Bitmovin). Slot 3
+        and slot 5 fired in identical sequence to the Netflix
+        utility.
+  \item \textbf{CDM-instance count.} The single Netflix tab spawned
+        exactly one CDM utility process across an eight-hour
+        observation window; we did not observe a second utility
+        materialising for the same tab.
+\end{enumerate}
+
+\subsection{Candidate findings refuted}
+\label{sec:robustness-refuted}
+
+The falsification sprint also surfaced two candidate findings that
+were refuted by deeper byte-level analysis. We document them here
+because they typify the bug-class candidates a less rigorous
+methodology would have falsely promoted:
+
+\textbf{P1 (PEAuth unauth pool write):} A subagent audit of
+\texttt{peauth.sys} initially flagged an apparent unauthenticated
+kernel-pool write at offset \texttt{0x140042980} where a
+user-controlled size field at \texttt{[rdi+0x14]} appeared to be
+used as a \texttt{memcpy} length before the
+\texttt{CiGetPEInformation} signing check at
+\texttt{0x1400429ae}. Byte-level disassembly of the range
+\texttt{0x42900..0x429e0} revealed an explicit 32-bit overflow
+check (\texttt{lea r12d, [r15+rsi]; cmp r12d, r15d; jb fail}) at
+\texttt{0x42964} and an upper-bound check at \texttt{0x4296d}
+between the parameter read and the memcpy. The candidate is
+refuted; no kernel-side bug is present.
+
+\textbf{W2 (PSSH parser OOB read):} A subagent audit of CDM\_11
+flagged offsets \texttt{0x1D6E1}, \texttt{0x1D8CF},
+\texttt{0x1DB9D}, and \texttt{0x1DFB} as candidates for an
+out-of-bounds read in the PSSH/MP4-box header-size parsing
+(\texttt{mov r10d, [r{si/di}+4]}). Disassembly at those offsets
+revealed not box parsing but the round-table for an MD5 transform,
+with the operands being state-constant XORs and not buffer reads.
+The candidate is refuted; the bytes are crypto code, not parser
+code.
+
+These refutations and one further candidate that remained
+inconclusive established the methodological principle that any
+subagent ``high-confidence byte-verified'' claim must pass an
+independent manual byte review before being promoted to a
+publication-grade finding.
+
+% =============================================================================
+\section{Defender's Playbook}
+\label{sec:defender}
+
+This section translates the architectural and empirical findings
+into concrete defensive actions. The intended reader is a security
+engineer protecting a Chromium-family browser deployment, an
+incident responder triaging suspected CDM-stage compromise, or a
+detection engineer building hooks for an EDR.
+
+\subsection{Per-slot attack-surface table}
+
+Table~\ref{tab:attack-surface} summarises which of the nineteen
+CDM\_11 outer-vtable slots are an attack surface in practice,
+which are dormant during normal hardware-decoded playback, and
+which are unreachable from a network-positioned attacker.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{rlll}
+\toprule
+\textbf{Slot} & \textbf{Method} & \textbf{Atk reach} & \textbf{Steady-state activity} \\
+\midrule
+0  & Initialize                       & host & once per session \\
+1  & GetStatusForPolicy               & host & rare \\
+2  & SetServerCertificate             & host-cert & rare \\
+3  & CreateSessionAndGenerateRequest  & \textbf{manifest} & once per session start \\
+4  & LoadSession                      & host & rare \\
+5  & UpdateSession                    & \textbf{license CDN} & on license rotate \\
+6  & CloseSession                     & host & on teardown \\
+7  & RemoveSession                    & host & rare \\
+8  & TimerExpired                     & internal & internal \\
+9  & Decrypt                          & per-frame  & dormant (HW path) \\
+10 & InitializeAudioDecoder           & host & stub returns 3 \\
+11 & InitializeVideoDecoder           & host & once \\
+12 & DeinitializeDecoder              & host & on teardown \\
+13 & ResetDecoder                     & host & rare \\
+14 & DecryptAndDecodeFrame            & per-frame  & dormant (HW path) \\
+15 & DecryptAndDecodeSamples          & per-frame  & dormant (HW path) \\
+16 & OnPlatformChallengeResponse      & host & rare \\
+17 & OnQueryOutputProtectionStatus    & host & rare \\
+18 & OnStorageId                      & host & rare \\
+\bottomrule
+\end{tabular}
+\caption{Per-slot attack surface and steady-state activity profile.
+``Atk reach'' is the strongest controllable source of the slot's
+arguments: \textbf{manifest} = attacker-controllable DASH/CMAF PSSH
+box from the CDN serving the manifest; \textbf{license CDN} =
+attacker-controllable license-server response (CDN MITM or
+compromised licence service); \textbf{per-frame} = ciphertext from
+the stream's media segments; \emph{host} = host-browser-supplied
+opaque value; \emph{internal} = internal CDM scheduling.
+``Steady-state activity'' summarises whether the slot fires during
+ongoing playback once a session is established.}
+\label{tab:attack-surface}
+\end{table}
+
+\subsection{Detection signatures}
+
+Three detection signatures fall directly out of the architecture
+and the runtime evidence.
+
+\textbf{Signature D1 --- vtable canary.}  The outer vtable lives in
+\texttt{widevinecdm.dll}'s read-only \texttt{.rdata} section.  Each
+of the nineteen entries should point into \texttt{widevinecdm.dll}'s
+\texttt{.text}.  An EDR or in-process integrity check that reads
+the nineteen outer-vtable QWORDs after CDM initialisation and
+verifies they all resolve inside \texttt{widevinecdm.dll}'s
+\texttt{[image\_base, image\_base+image\_size)} interval will catch
+the runtime tampering pattern used by this paper's shim and by any
+other CDM-hooking tool that uses the same shape.
+
+\textbf{Signature D2 --- CFG bitmap drift.}  Each call to
+\texttt{SetProcessValidCallTargets} inside a CDM utility process is
+itself a signal.  In normal operation, the CDM utility does not
+self-register additional CFG-valid targets; the bitmap is
+established at module load and does not grow.  A growth event after
+process steady-state, particularly one whose new valid targets lie
+outside \texttt{widevinecdm.dll}'s image range, is a strong
+indicator of an injection-and-patch attempt.
+
+\textbf{Signature D3 --- per-frame slot activity in HW path.}  Our
+empirical finding (Section~\ref{sec:findings-dormancy}) is that
+slot 9, slot 14, and slot 15 are dormant during steady-state
+HW-decoded playback.  An in-process probe that hooks those three
+slots and observes any activity at all during HW playback has
+caught either an attacker forcing fallback to SW decode (a known
+hostile-CDN technique) or an in-renderer attacker who has not yet
+realised that the per-frame path is dormant.
+
+\subsection{Triage workflow on suspected CDM compromise}
+
+\begin{enumerate}[itemsep=2pt]
+  \item Identify the suspected CDM utility process by
+        \texttt{tasklist /m widevinecdm.dll}; on a single
+        Widevine-source playback session there should be one.
+  \item Verify the outer-vtable RVA against the binary using the
+        released discoverer
+        (\S\ref{sec:static-export}). Cross-check the
+        runtime-loaded outer vtable for tampering using
+        Signature D1.
+  \item For each of slots 3, 5, 14, 15, read the QWORD at the
+        outer-vtable entry and confirm it is the original thunk.
+        Slots 14 and 15 in particular are the per-frame paths an
+        in-renderer attacker would target if they were not aware of
+        HW-decode dormancy.
+  \item Examine the CFG bitmap for additions outside
+        \texttt{widevinecdm.dll}'s image range (Signature D2).
+\end{enumerate}
+
+% =============================================================================
+\section{Attacker's Reading}
+\label{sec:attacker}
+
+This section translates the same findings from the other side of
+the line. The intended reader is a security researcher mapping the
+EME attack surface, a red-team operator scoping a kernel-side
+follow-on, or a coordinated-disclosure participant who needs to
+know which slots merit deep audit time.
+
+\subsection{What is reachable and what is not}
+
+The dormancy finding (Section~\ref{sec:findings-dormancy}) is bad
+news for the obvious attack: a compromised renderer cannot
+intercept decoded frames through the CDM\_11 interface during L1
+hardware decode because the per-frame slots are not invoked. The
+attacker who wants decoded frames has to find an independent
+capability against Media Foundation PMP, the GPU driver's
+protected-surface allocator, or the user-mode side of the OPM
+contract enforced by \texttt{peauth.sys}. Those are kernel- and
+driver-class targets, an order of magnitude harder to reach from a
+renderer compromise.
+
+The session-management slots are good news. Slot 3
+(\texttt{CreateSessionAndGenerateRequest}) ingests the PSSH box,
+which is attacker-controllable from any compromised CDN serving
+the DASH/CMAF manifest. Slot 5 (\texttt{UpdateSession}) ingests
+the license-server response, which is attacker-controllable from
+any compromised licensing endpoint or any MITM-positioned attacker.
+Both slots dispatch through a clean MSVC wrapper at the
+\texttt{m\_impl} layer and then call into an MBA-obfuscated
+layer-3 handler. The clean wrapper is auditable; the layer-3
+handler is the realistic bug-hunting target.
+
+\subsection{Where to audit}
+
+Concrete prioritisation for layer-3 audit time:
+
+\begin{enumerate}[itemsep=2pt]
+  \item \textbf{Slot 3 layer-3} (Edge 150 RVA \texttt{0x21f200}).
+        PSSH/MP4-box parser, attacker-controllable from manifest.
+        Heavily MBA-obfuscated. The right tool here is structured
+        fuzzing of PSSH box mutations rather than manual disasm.
+  \item \textbf{Slot 5 layer-3} (clean wrapper at Edge 150
+        \texttt{0x1d4ab0}, dispatches into the obfuscated
+        whitebox-AES processor at \texttt{0x233bd0} via a
+        worker-thread queue). License-response parser,
+        attacker-controllable. Async path; harder to reach with
+        synchronous fuzzing.
+  \item \textbf{Slot 9 layer-3} (RVA \texttt{0x22ec00}).
+        \texttt{Decrypt} handler. Heavily MBA-obfuscated. Per the
+        dormancy finding, dormant on the HW path; would only be
+        reachable in an SW-decode scenario.
+  \item \textbf{Slot 14 layer-3} (RVA \texttt{0x230c20}).
+        \texttt{DecryptAndDecodeFrame}. Most heavily obfuscated of
+        all the handlers we measured (score 22 in our classifier).
+        Same dormancy caveat as slot 9.
+\end{enumerate}
+
+\subsection{What is not the right target}
+
+Slot 2 (\texttt{SetServerCertificate}) and slot 18
+(\texttt{OnStorageId}) both pass opaque blobs that the CDM
+forwards without parsing. The clean dispatch chain at both layers
+is the empirical signal that there is nothing to audit there.
+Spending audit time on these slots is consistent with the failure
+mode of audits that assume all critical-path slots are obfuscated;
+they are not.
+
+% =============================================================================
+\section{Generalisability}
+\label{sec:generalisability}
+
+The Windows L1 Widevine CDM is one of three commercial desktop DRM
+runtimes a researcher might be asked to map. Microsoft PlayReady
+ships in Edge's IE-mode and inside the
+\texttt{Windows.Media.Protection.MediaProtectionManager} stack.
+Apple FairPlay ships in Safari on macOS and in TV.app. Both expose
+a host-CDM contract that is, at the level of abstraction this paper
+operates at, very similar to Widevine's CDM\_11 contract: a small
+number of host-callable methods, an opaque library that
+constructs an instance of a versioned interface, an internal
+dispatch path that does the actual work.
+
+The methodology we release is parameterised so that it generalises
+across these targets with minimal modification:
+
+\begin{itemize}[itemsep=2pt]
+  \item The \texttt{cdm\_arch\_discover.py} discoverer locates a
+        constructor's vtable-installation pattern in any PE binary
+        by structural search; the only Widevine-specific assumption
+        is the export name \texttt{CreateCdmInstance}, which a
+        researcher applying this to PlayReady or FairPlay
+        substitutes with the relevant entry point.
+  \item The shape-only shim's hook semantics are independent of
+        the per-slot signature; each \texttt{WvHookSlotN} takes the
+        full callee-save register tuple. The same shape applies to
+        a PlayReady or FairPlay vtable that uses a different
+        signature shape per slot.
+  \item The CFG bypass via \texttt{SetProcessValidCallTargets}
+        is a Windows-process-level mitigation, not a Widevine-level
+        one. It applies unchanged to any Windows process that
+        loads a third-party library and enables CFG.
+\end{itemize}
+
+A separate paper on each of PlayReady and FairPlay applying this
+methodology is, we hope, follow-on work that future researchers
+will produce. The Buchanan model that constrains the methodology
+to shape-only observation is the same in all three cases.
+
+\subsection*{For follow-on researchers}
+
+Two of the paper's design choices are intended to short-circuit
+common dead ends in follow-on work.
+
+First, the methodology is structured to be applied to any future
+\texttt{widevinecdm.dll} build with no manual RVA editing. The
+discoverer locates the outer vtable from the binary alone; the
+runtime instrumentation script takes the discovered RVA as a
+parameter. Re-running the same methodology against a future Chrome
+stable, or against the \texttt{libwidevinecdm.so} variants that
+ship on Linux and Chrome OS, is mostly a matter of running the
+discoverer.
+
+Second, the false-start narrative in
+Section~\ref{sec:static-false} is intended to head off two common
+dead ends that look superficially correct. Researchers entering
+this RE space should expect to encounter several internal
+nineteen-slot dispatch surfaces that are \emph{not} the public
+CDM\_11 vtable, and should expect the first-attempt
+obfuscation-attribution layer to be wrong by one indirection. The
+constructor-trace pivot from \texttt{CreateCdmInstance} is the
+reliable disambiguator.
+
+% =============================================================================
+\section{Ethics, Disclosure, and What We Did Not Do}
+\label{sec:ethics}
+
+This study contains no:
+\begin{itemize}[itemsep=1pt,topsep=2pt]
+\item decrypted frame, in any form, captured to disk, sent over IPC,
+      or retained transiently across the run of the shim;
+\item ciphertext byte, transient or persistent, retrieved through
+      the shim;
+\item key material, content key, key wrap, or content-encryption
+      key, captured at any layer;
+\item attack against \texttt{peauth.sys}, the Windows PMP, or any
+      decoder-side component positioned to materialise a decoded
+      frame;
+\item exploit code, weaponized shim, or off-the-shelf
+      content-circumvention tool;
+\item production network attack against Netflix, Bitmovin, or any
+      EME application studied;
+\item reverse-engineering result we cannot reproduce from the
+      released source-only methodology against the same binary.
+\end{itemize}
+
+We have forensically verified the absence of content bytes in every
+artefact we produced. The captured shape logs are pure ASCII JSON
+totalling $\sim$56~MB and contain only the metadata fields described
+in Section~\ref{sec:runtime-shape}. The unique \texttt{key\_id}
+hash count in the captured runtime events is zero: the code path
+that would have computed a hash of a Netflix key\_id was never
+exercised at runtime, because the slots that take an
+\texttt{InputBuffer\_2*} argument were not invoked.
+
+No vendor was notified prior to this submission because the work
+does not constitute a vulnerability report. We will coordinate with
+Google's Chrome Vulnerability Reward Program and the relevant
+Widevine security channels prior to any future submission of
+exploit-class findings derived from the methodology here.
+
+% =============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented a byte-verified architectural model of the modern
+Widevine CDM\_11 dispatch as it ships in two representative
+Chromium-family browsers, and a runtime-confirmed empirical map of
+which CDM\_11 slots are exercised during steady-state
+hardware-decoded Netflix playback. The user-facing per-frame slots
+are dormant under L1 hardware decode while an internal dispatch
+table generates $\sim$2.3k events per second of cryptographic or
+scheduler activity that is invisible from the EME boundary. The
+session-management slots remain reachable and exercise the same
+dispatch path regardless of whether the host EME application is
+Netflix or a non-commercial Widevine test source. The library
+distributes mixed-boolean-arithmetic obfuscation across the slot
+space in a pattern that mirrors the depth at which each slot
+begins to parse structured attacker-influenced data.
+
+The work is situated in two decades of prior DRM research, follows
+the Buchanan model of architectural-only publication, and produces
+no extraction artefact. The methodology and all source needed to
+reproduce the empirical results are released alongside the paper.
+
+% =============================================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+
+\bibitem{widevine-spec}
+Google.
+\textit{Widevine DRM Architecture Overview.}
+Google Developers documentation, accessed 2026.
+
+\bibitem{chromium-cdm-api}
+Chromium Project.
+\textit{\texttt{media/cdm/api/content\_decryption\_module.h}.}
+Chromium source tree, accessed 2026.
+
+\bibitem{chromium-cdm-mojo}
+Chromium Project.
+\textit{\texttt{media.mojom.ContentDecryptionModule} interface.}
+Chromium source tree, accessed 2026.
+
+\bibitem{chromium-cig}
+Chromium Project.
+\textit{Code Integrity Guard on utility processes.}
+Chromium documentation, accessed 2026.
+
+\bibitem{microsoft-cfg}
+Microsoft Corporation.
+\textit{Control Flow Guard.}
+Microsoft Learn documentation, accessed 2026.
+
+\bibitem{ms-spvct-docs}
+Microsoft Corporation.
+\textit{SetProcessValidCallTargets function.}
+Microsoft Learn documentation, accessed 2026.
+
+\bibitem{w3c-eme}
+W3C.
+\textit{Encrypted Media Extensions, W3C Recommendation 18 September 2017.}
+
+\bibitem{w3c-pssh}
+W3C.
+\textit{ISO Common Encryption EME Stream Format and Initialization Data.}
+
+\bibitem{iso-cenc}
+ISO/IEC 23001-7.
+\textit{Information technology — MPEG systems technologies — Part 7: Common encryption in ISO base media file format files.}
+
+\bibitem{buchanan-blog}
+D.~Buchanan.
+\textit{Personal blog: \url{https://www.da.vidbuchanan.co.uk/}.}
+Series of architectural reverse-engineering writeups, 2019--present.
+
+\bibitem{buchanan-imessage}
+D.~Buchanan.
+\textit{Analysing the iMessage NaCl key-wrap.}
+Personal blog, 2023.
+
+\bibitem{buchanan-t2}
+D.~Buchanan.
+\textit{Apple T2 secure boot chain analysis.}
+Personal blog, 2022.
+
+\bibitem{bunnie-xbox-book}
+A.~Huang.
+\textit{Hacking the Xbox: An Introduction to Reverse Engineering.}
+No Starch Press, 2003.
+
+\bibitem{bunnie-nettv}
+A.~Huang and S.~Cross.
+\textit{NeTV: A Stream Mediation Device, and the DMCA Exemption Process.}
+Project documentation, 2011--2015.
+
+\bibitem{sklyarov-case}
+\textit{United States v. ElcomSoft Ltd., 203 F. Supp. 2d 1111 (N.D. Cal. 2002).}
+
+\bibitem{dvdjon-norway}
+\textit{Det Offentlige v. Jon Lech Johansen.}
+Borgarting Court of Appeal, Norway, 2003.
+
+\bibitem{decss-2600}
+\textit{Universal City Studios, Inc. v. Reimerdes, 111 F. Supp. 2d 294 (S.D.N.Y. 2000).}
+
+\bibitem{hadad-case}
+Reporting and analysis of Israeli prosecutions of DRM reverse engineers
+in the early 2000s, secondary sources.
+
+\bibitem{quarkslab-widevine}
+Quarkslab security research team.
+\textit{Reverse engineering of Widevine: a year of research.}
+Quarkslab technical blog, 2019.
+
+\bibitem{quarkslab-android-widevine}
+Quarkslab security research team.
+\textit{Inside Widevine on Android: the OEMCrypto TrustZone trampoline.}
+Quarkslab technical blog, 2020.
+
+\bibitem{l3-decryptor}
+Independent contributors.
+\textit{Widevine L3 decryptor: reduction of software-only Widevine to a clean-room C implementation.}
+GitHub, 2019--present.
+
+\bibitem{ango-l3-decryptor}
+Independent contributors.
+\textit{ANGO L3 Widevine decryptor.}
+GitHub, 2021--present.
+
+\bibitem{checkpoint-widevine}
+Check Point Research.
+\textit{Various analyses of Widevine on Android.}
+Check Point Research blog, 2019--2024.
+
+\bibitem{lief-tool}
+R.~Thomas et al.
+\textit{LIEF: Library to Instrument Executable Formats.}
+Quarkslab, \url{https://lief.re/}, 2017--present.
+
+\bibitem{eyrolles-mba}
+N.~Eyrolles, L.~Goubin, M.~Videau.
+\textit{Defeating MBA-based Obfuscation.}
+Proceedings of the 2016 ACM Workshop on Software PROtection.
+
+\bibitem{biondi-mba}
+F.~Biondi, S.~Josse, A.~Legay, T.~Sirvent.
+\textit{Effectiveness of synthesis in concolic deobfuscation.}
+Computers \& Security, vol. 70, 2017.
+
+\bibitem{chow-aes-whitebox}
+S.~Chow, P.~Eisen, H.~Johnson, P.C.~van~Oorschot.
+\textit{White-Box Cryptography and an AES Implementation.}
+SAC 2002.
+
+\bibitem{lepoint-whitebox}
+T.~Lepoint, M.~Rivain.
+\textit{White-box cryptography: a survey.}
+IACR ePrint, 2014.
+
+\bibitem{capstone-tool}
+N.A.~Quynh et al.
+\textit{Capstone: Next-generation disassembly framework.}
+Black Hat USA 2014.
+
+\bibitem{pefile-tool}
+E.~Carrera.
+\textit{pefile: Portable Executable format parser.}
+GitHub, 2008--present.
+
+\end{thebibliography}
+
+\appendix
+
+% =============================================================================
+\section{Per-slot dispatch table, both binaries}
+\label{app:slot-table}
+
+\begin{center}\footnotesize
+\begin{tabular}{rlll}
+\toprule
+\textbf{Slot} & \textbf{Method} & \textbf{Edge 150 RVA} & \textbf{Chrome 149 RVA} \\
+\midrule
+0  & Initialize                       & 0x1db390 & 0x1e0420 \\
+1  & GetStatusForPolicy                & 0x1da7a0 & 0x1df8d0 \\
+2  & SetServerCertificate              & 0x1dab10 & 0x1dfba0 \\
+3  & CreateSessionAndGenerateRequest   & 0x1dad00 & 0x1dfdc0 \\
+4  & LoadSession                       & 0x1dad20 & 0x1dfde0 \\
+5  & UpdateSession                     & 0x1dad40 & 0x1dfe00 \\
+6  & CloseSession                      & 0x1dad60 & 0x1dfe20 \\
+7  & RemoveSession                     & 0x1dad80 & 0x1dfe40 \\
+8  & TimerExpired                      & 0x1dada0 & 0x1dfe60 \\
+9  & Decrypt                           & 0x1dadc0 & 0x1dfe80 \\
+10 & InitializeAudioDecoder            & 0x1dade0 & 0x1dfea0 \\
+11 & InitializeVideoDecoder            & 0x1dae00 & 0x1dfec0 \\
+12 & DeinitializeDecoder               & 0x1dae20 & 0x1dfee0 \\
+13 & ResetDecoder                      & 0x1dae40 & 0x1dff00 \\
+14 & DecryptAndDecodeFrame             & 0x1dae60 & 0x1dff20 \\
+15 & DecryptAndDecodeSamples           & 0x1dae80 & 0x1dff40 \\
+16 & OnPlatformChallengeResponse       & 0x1daea0 & 0x1dff60 \\
+17 & OnQueryOutputProtectionStatus     & 0x1daec0 & 0x1dff80 \\
+18 & OnStorageId                       & 0x1db310 & 0x1e03a0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =============================================================================
+\section{Shape-log schema}
+\label{app:schema}
+
+The captured JSONL events use one of two shapes.
+
+\textbf{Generic call} (for slots that are not
+\texttt{InputBuffer\_2}-consuming):
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
+{
+  "kind" : "call",
+  "slot" : <int 0..18>,
+  "n"    : <monotonic call number for this slot>,
+  "tsc"  : <QueryPerformanceCounter snapshot>,
+  "rh"   : <FNV-1a-32 hash of rcx XOR rdx XOR r8 XOR r9>
+}
+\end{lstlisting}
+
+\textbf{Shape} (for slots 9, 14, 15):
+\begin{lstlisting}[basicstyle=\ttfamily\footnotesize]
+{
+  "kind" : "ib",
+  "slot" : <9|14|15>,
+  "n"    : <monotonic call number>,
+  "tsc"  : <QueryPerformanceCounter snapshot>,
+  "es"   : <encryption_scheme; 0=clear, 1=CENC-CTR, 2=CBCS>,
+  "is"   : <data_size; size only, never the bytes>,
+  "kis"  : <key_id_size>,
+  "kh"   : <FNV-1a-32 hash of first 16 bytes of key_id>,
+  "ivs"  : <iv_size>,
+  "ivnz" : <1 if IV has any non-zero byte, else 0>,
+  "ns"   : <num_subsamples>,
+  "pc"   : <pattern_crypt>,
+  "ps"   : <pattern_skip>,
+  "mt"   : <media timestamp>
+}
+\end{lstlisting}
+
+Notably absent fields:
+\texttt{data}, \texttt{key\_id} bytes, \texttt{iv} bytes,
+\texttt{subsamples} array, output-frame contents,
+content-encryption key, key-wrap key, OEMCrypto internal state.
+These are deliberately omitted.
+
+\end{document}
